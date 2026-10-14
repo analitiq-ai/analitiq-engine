@@ -1,3 +1,46 @@
+---
+schemaVersion: 0.2.0
+id: "0003"
+title: "ADR 0003: The CDK is a toolbox, not a gatekeeper"
+status: accepted
+date: 2026-06-01
+deciders: ["@Analitiq-Bot-Wonka"]
+consulted: []
+informed: []
+tags: []
+scope: component
+reversibility: unknown
+blastRadius: component
+supersedes: []
+relatesTo: ["0004", "0005"]
+conflictsWith: []
+affects:
+  - type: path
+    pattern: "cdk/pyproject.toml"
+  - type: path
+    pattern: "cdk/cdk/contract.py"
+  - type: path
+    pattern: "cdk/cdk/registry.py"
+  - type: path
+    pattern: "cdk/cdk/secrets/protocol.py"
+  - type: path
+    pattern: "cdk/cdk/type_map/*.py"
+  - type: path
+    pattern: "cdk/cdk/sql/dialects.py"
+  - type: path
+    pattern: "cdk/cdk/sql/generic.py"
+  - type: path
+    pattern: "cdk/cdk/query_builder.py"
+assertions: []
+provenance:
+  authoredBy: human
+  importedFrom:
+    sourceKind: madr
+    sourceRef: docs/adr/0003-the-cdk-is-a-toolbox-not-a-gatekeeper.md
+    fingerprint: beed2d15b6f6bebb01f586c5f270bf990040af519dc9fc9038be439779eb6c34
+externalRefs: []
+complianceControls: []
+---
 # ADR 0003: The CDK is a toolbox, not a gatekeeper
 
 The Connector CDK is vendor-neutral machinery a connector uses — the
@@ -24,6 +67,17 @@ Protocols, the transport families, the `SecretsResolver` seam, the
 type-map *mechanism* (not any mappings), and optional reusable building
 blocks like a generic SQL base a connector may subclass — every one of
 those passes the test.
+
+One CDK module does not pass it, and it is a known exception to this
+decision, not a second rule. `QueryBuilder` resolves PostgreSQL,
+MySQL/MariaDB, MSSQL and SQLite from a SQLAlchemy dialect table built into
+the CDK. It also branches on the vendor in three places: PostgreSQL's
+bind-parameter style, PostgreSQL's `ILIKE`, and MSSQL's `?` placeholders.
+Every other system resolves through SQLAlchemy's dialect registry, using
+the connector's `SqlDialect.sqlalchemy_registry_name`, or the driver's
+dialect name when that is unset. So adding Clickhouse still leaves the CDK
+unchanged, but the four built-in systems are compiled by vendor code that
+lives in the CDK.
 
 ## Why not "the engine owns drivers and exposes operations"
 

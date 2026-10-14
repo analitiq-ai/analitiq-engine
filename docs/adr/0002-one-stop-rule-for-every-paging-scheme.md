@@ -1,6 +1,42 @@
-# ADR 0002: One stop rule for every paging scheme
+---
+schemaVersion: 0.2.0
+id: "0002"
+title: "ADR 0002: One stop rule for every API paging scheme"
+status: accepted
+date: 2026-08-01
+deciders: ["@Analitiq-Bot-Wonka"]
+consulted: []
+informed: []
+tags: []
+scope: component
+reversibility: unknown
+blastRadius: component
+supersedes: []
+relatesTo: ["0003"]
+conflictsWith: []
+affects:
+  - type: path
+    pattern: "cdk/cdk/api/page_loop.py"
+  - type: path
+    pattern: "cdk/cdk/api/strategies.py"
+  - type: path
+    pattern: "cdk/cdk/api/read_setup.py"
+  - type: path
+    pattern: "cdk/cdk/api/dialects.py"
+assertions: []
+provenance:
+  authoredBy: human
+  importedFrom:
+    sourceKind: madr
+    sourceRef: docs/adr/0002-one-stop-rule-for-every-paging-scheme.md
+    fingerprint: 64ae36ab48768e68949aa89cefce01779a29ba75d39f1835d429d821e5a285e6
+externalRefs: []
+complianceControls: []
+---
+# ADR 0002: One stop rule for every API paging scheme
 
-One loop walks every paging scheme the contract declares.
+One loop walks every paging scheme the contract declares for an API
+endpoint.
 `PageLoop` owns the loop order and the stopping; a strategy adapter owns
 only what its own scheme knows: what the first request looks like, and what
 the next one looks like given the page that came back.
@@ -44,6 +80,12 @@ That failure is visible and fixable in the endpoint document, which is the
 trade against a heuristic whose failure mode is a quiet, complete-looking
 short read.
 
+The database read path is outside this record.
+`GenericSQLConnector.read_batches` does not run on `PageLoop`. On both its SQLAlchemy and ADBC transports it
+pages by offset, one batch-size page at a time, whichever
+`database_pagination` variant the stream declares, and it ends the read on a
+page shorter than the batch size.
+
 ## Why the scheme cannot re-decide it
 
 Collapsing "build the next request" and "are we done" into a single
@@ -51,8 +93,9 @@ Collapsing "build the next request" and "are we done" into a single
 its `yield` without having advanced first, so a page the scheme cannot
 advance from fails while the failure still costs nothing — before the
 engine commits records it would then be unable to continue past. Keyset is
-where this bites: a final page whose last record is missing the ordering
-field raises rather than yielding rows the read can never resume after.
+where this bites: a page that `stop_when` did not end and whose last
+record is missing the ordering field raises rather than yielding rows the
+read can never resume after.
 
 There is no dialect hook for "get the next page". A connector package
 overrides its dialect to translate — unwrap an envelope, sign a request,

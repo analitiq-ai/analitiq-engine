@@ -1,0 +1,7 @@
+{
+  "name": "analitiq-engine-tooling",
+  "private": true,
+  "devDependencies": {
+    "@adrkit/cli": "0.20.0"
+  }
+}

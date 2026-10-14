@@ -1,3 +1,36 @@
+---
+schemaVersion: 0.2.0
+id: "0004"
+title: "ADR 0004: Capability is derived, never declared"
+status: accepted
+date: 2026-06-01
+deciders: ["@Analitiq-Bot-Wonka"]
+consulted: []
+informed: []
+tags: []
+scope: component
+reversibility: unknown
+blastRadius: component
+supersedes: []
+relatesTo: ["0003", "0005"]
+conflictsWith: []
+affects:
+  - type: path
+    pattern: "cdk/cdk/contract.py"
+  - type: path
+    pattern: "cdk/cdk/registry.py"
+  - type: path
+    pattern: "src/worker/__main__.py"
+assertions: []
+provenance:
+  authoredBy: human
+  importedFrom:
+    sourceKind: madr
+    sourceRef: docs/adr/0004-capability-is-derived-never-declared.md
+    fingerprint: d85c215f54eac568b64a95de7539ad24d95c5f278cd2f6bed4199fbac54935cb
+externalRefs: []
+complianceControls: []
+---
 # ADR 0004: Capability is derived, never declared
 
 Whether a connector can discover schemas, create tables, read, or write is
@@ -45,13 +78,17 @@ if isinstance(connector, Discoverable):
     schemas = await connector.list_schemas(runtime)
 ```
 
-This governs two things, and only two: the CDK's own kind defaults (`is`
-this generic class really `Readable`, checked once via `issubclass` when
-a kind default is loaded — see
-[`engine-architecture.md`](../architecture/engine-architecture.md#connector-registries));
-and any caller deciding whether to *offer* an optional capability before
-trying it. It does **not** govern whether an externally-installed
-connector package's declared role is honoured. That role — source,
+This governs two things, and only two: the CDK's own kind defaults; and
+any caller deciding whether to *offer* an optional capability before
+trying it. The kind defaults are a known exception, where the Protocols
+check a declaration rather than replace it. Each generic class's roles are
+declared on its `KindDefault` in `KIND_DEFAULTS`, so `build_registries` can
+seed both registries without importing a transport the run may never use.
+`load_kind_default` then refuses, via `issubclass` against `Readable` /
+`Writable`, a declared role the class does not implement; a role the class
+implements but the table omits is not refused — see
+[`engine-architecture.md`](../architecture/engine-architecture.md#connector-registries).
+It does **not** govern whether an externally-installed connector package's declared role is honoured. That role — source,
 destination, or both — is declared by which entry-point group
 (`analitiq.source_connectors` / `analitiq.destination_connectors`) the
 package registers under; the worker invokes the resolved class directly,

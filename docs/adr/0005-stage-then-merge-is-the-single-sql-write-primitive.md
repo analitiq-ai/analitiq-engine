@@ -1,8 +1,52 @@
+---
+schemaVersion: 0.2.0
+id: "0005"
+title: "ADR 0005: Stage-then-merge is the single SQL write primitive"
+status: accepted
+date: 2026-07-24
+deciders: ["@Analitiq-Bot-Wonka"]
+consulted: []
+informed: []
+tags: []
+scope: component
+reversibility: unknown
+blastRadius: component
+supersedes: []
+relatesTo: ["0003", "0006"]
+conflictsWith: []
+affects:
+  - type: path
+    pattern: "cdk/cdk/sql/stage_cycle.py"
+  - type: path
+    pattern: "cdk/cdk/sql/write_plan.py"
+  - type: path
+    pattern: "cdk/cdk/sql/*backend.py"
+  - type: path
+    pattern: "cdk/cdk/sql/generic.py"
+  - type: path
+    pattern: "cdk/cdk/sql/capabilities.py"
+  - type: path
+    pattern: "cdk/cdk/sql/dialects.py"
+assertions: []
+provenance:
+  authoredBy: human
+  importedFrom:
+    sourceKind: madr
+    sourceRef: docs/adr/0005-stage-then-merge-is-the-single-sql-write-primitive.md
+    fingerprint: 0af2620380847b23da7e280143c119f0a42c03f7c4336ba4756d63eebddaa93b
+externalRefs: []
+complianceControls: []
+---
 # ADR 0005: Stage-then-merge is the single SQL write primitive
 
-Every SQL write, on every transport, every dialect, every write mode,
-lands the batch in a stage table first and then runs exactly one mode
-statement from stage to target. There is no second write shape.
+Every SQL write of a row-bearing batch, on every transport, every
+dialect, every write mode, lands the batch in a stage table first and
+then runs exactly one mode statement from stage to target. There is no
+second write shape. The one statement that runs outside the cycle is the
+emptying of the target when a `truncate_insert` refresh's first batch
+carries no rows: there is nothing to land, so `GenericSQLConnector` runs
+the dialect's `empty_table_sql` on its own, through the backend's
+`run_ddl`, with no stage table.
 
 ## The failure mode this closes off
 

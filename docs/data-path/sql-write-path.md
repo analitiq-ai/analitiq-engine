@@ -574,13 +574,16 @@ Mechanics:
   coalescer to hold, and the engine's synthetic empty `batch_seq` 1 —
   which is what truncates the target after a clean zero-row read — is sent
   outside the coalescer's path.
-- **The dlq/skip unit is the sent batch — as it always was.** Declaring
-  `write_unit` consciously widens that unit: a fatally rejected coalesced
-  unit is DLQ'd or skipped wholesale, good rows included, exactly as an
-  uncoalesced source batch would be. Nothing is lost under `dlq`: every row of
-  the unit is persisted to the dead-letter queue as a source batch's rows are
-  (the per-record JSONL the DLQ writes), and recovery is the
-  same operator workflow either way — over more rows. A row the upsert
+- **A failed send fails the whole sent batch.** Declaring `write_unit`
+  consciously widens that batch to the coalesced unit, good rows included,
+  exactly as an uncoalesced source batch would be: a coalesced unit that
+  exhausts its retries is DLQ'd or skipped wholesale under `dlq`/`skip` (a
+  `truncate_insert` stream's first unit fails the stream instead), and a
+  fatally rejected unit fails the stream whatever the strategy, the whole
+  unit DLQ'd first under `dlq`. Coalescing does not change how a row
+  reaches the dead-letter queue: a dead-lettered unit's rows take the same
+  per-record DLQ write a source batch's rows take, and recovery is the same
+  operator workflow either way — over more rows. A row the upsert
   collapse dropped is represented in that unit by its surviving later
   version — same `conflict_keys` identity, newer payload — so a
   dead-lettered unit still carries one row per identity, and replaying it

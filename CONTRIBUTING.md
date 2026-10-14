@@ -5,6 +5,7 @@
 ```bash
 poetry install
 poetry shell
+npm ci       # the pinned adrkit CLI (./node_modules/.bin/adr) for docs/adr/
 ```
 
 ## Testing

@@ -1,3 +1,36 @@
+---
+schemaVersion: 0.2.0
+id: "0006"
+title: "ADR 0006: Batch coalescing lives in the engine, not the destination"
+status: accepted
+date: 2026-07-24
+deciders: ["@Analitiq-Bot-Wonka"]
+consulted: []
+informed: []
+tags: []
+scope: component
+reversibility: unknown
+blastRadius: component
+supersedes: []
+relatesTo: ["0005"]
+conflictsWith: []
+affects:
+  - type: path
+    pattern: "src/engine/batch_policy.py"
+  - type: path
+    pattern: "src/engine/stream_processor.py"
+  - type: path
+    pattern: "src/grpc/client.py"
+assertions: []
+provenance:
+  authoredBy: human
+  importedFrom:
+    sourceKind: madr
+    sourceRef: docs/adr/0006-batch-coalescing-is-engine-side.md
+    fingerprint: 64eea70da2ddbd3384aa6acc38d3b3d9c1926916293c39e4454c31c501c1c157
+externalRefs: []
+complianceControls: []
+---
 # ADR 0006: Batch coalescing lives in the engine, not the destination
 
 The wire protocol is strictly one batch, one ack, one cursor persist: a
@@ -54,8 +87,11 @@ what the project-level load-job quota and per-table operation-rate limits
 actually bound.
 
 The cost is real and is taken deliberately: declaring a `write_unit`
-widens the dlq/skip unit to the coalesced batch, so a fatally rejected
-unit is rejected wholesale, good rows included. This is not new
+widens the failure unit to the coalesced batch, good rows included: a
+unit that exhausts its retries is dead-lettered or skipped wholesale under
+dlq/skip (a `truncate_insert` stream's first unit fails the stream
+instead), and a fatally rejected unit fails the stream whatever the
+strategy, the whole unit dead-lettered first under dlq. This is not new
 machinery to route around — whole-batch rejection without per-record
 attribution is this engine's existing design stance (an untrusted
 connector cannot be trusted to blame individual rows), and the operator's

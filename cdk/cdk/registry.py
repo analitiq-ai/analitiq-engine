@@ -28,10 +28,11 @@ Source and destination connectors are tracked in **separate** registries
 (separate entry-point groups) because a connector may serve one role or
 both. The two populations state their roles differently, and deliberately:
 a **connector package** states them through the two entry-point groups (the
-package's answer to give), while a **kind default** states them through the
-capability Protocols its class implements (``cdk.contract``), because the
-CDK owns that class and reading the answer off it is what stops a
-hand-written table from disagreeing with the code.
+package's answer to give), while a **kind default** declares them on its
+:class:`KindDefault`, so registration imports no transport the run may
+never use. The capability Protocols its class implements (``cdk.contract``)
+then check that declaration when the class first loads, which is what stops
+the table from claiming a role the code cannot serve.
 """
 
 from __future__ import annotations

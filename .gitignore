@@ -416,6 +416,10 @@ yarn-error.log*
 /.specify/extensions/.cache/
 /.specify/extensions/.backup/
 
+# The npm manifest that pins the adrkit CLI, tracked past the blanket *.json.
+!/package.json
+!/package-lock.json
+
 # Keep test fixtures
 !**/tests/**/fixtures/**
 !**/tests/**/data/**/*.json
