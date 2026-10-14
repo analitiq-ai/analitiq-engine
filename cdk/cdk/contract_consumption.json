@@ -265,18 +265,18 @@
     },
     "analitiq.contracts.endpoints.Column": {
       "arrow_type": [
-        "cdk.sql.generic:1326"
+        "cdk.sql.generic:1336"
       ],
       "default": [
-        "cdk.sql.generic:1322"
+        "cdk.sql.generic:1332"
       ],
       "name": [
-        "cdk.sql.generic:1321",
-        "cdk.sql.generic:2155",
-        "cdk.sql.generic:2443"
+        "cdk.sql.generic:1331",
+        "cdk.sql.generic:2165",
+        "cdk.sql.generic:2453"
       ],
       "nullable": [
-        "cdk.sql.generic:1336"
+        "cdk.sql.generic:1346"
       ]
     },
     "analitiq.contracts.endpoints.Cursor": {
@@ -305,31 +305,31 @@
     },
     "analitiq.contracts.endpoints.DatabaseEndpointDoc": {
       "columns": [
-        "cdk.sql.generic:293",
-        "cdk.sql.generic:1320",
-        "cdk.sql.generic:2155",
-        "cdk.sql.generic:2443"
+        "cdk.sql.generic:297",
+        "cdk.sql.generic:1330",
+        "cdk.sql.generic:2165",
+        "cdk.sql.generic:2453"
       ],
       "database_object": [
-        "cdk.sql.generic:1127",
-        "cdk.sql.generic:2075"
+        "cdk.sql.generic:1136",
+        "cdk.sql.generic:2085"
       ],
       "primary_keys": [
-        "cdk.sql.generic:1130"
+        "cdk.sql.generic:1139"
       ]
     },
     "analitiq.contracts.endpoints.DatabaseObject": {
       "catalog": [
-        "cdk.sql.generic:1039",
-        "cdk.sql.generic:2093"
+        "cdk.sql.generic:1048",
+        "cdk.sql.generic:2103"
       ],
       "name": [
-        "cdk.sql.generic:1128",
-        "cdk.sql.generic:2076"
+        "cdk.sql.generic:1137",
+        "cdk.sql.generic:2086"
       ],
       "schema_": [
-        "cdk.sql.generic:1018",
-        "cdk.sql.generic:2092"
+        "cdk.sql.generic:1027",
+        "cdk.sql.generic:2102"
       ]
     },
     "analitiq.contracts.endpoints.FromParamExpression": {
@@ -937,7 +937,7 @@
       ],
       "scope": [
         "cdk.api.response_schema:173",
-        "cdk.sql.generic:648",
+        "cdk.sql.generic:655",
         "src.config.endpoint_resolver:86"
       ]
     },
@@ -953,7 +953,7 @@
       ],
       "scope": [
         "cdk.api.response_schema:173",
-        "cdk.sql.generic:648",
+        "cdk.sql.generic:655",
         "src.config.endpoint_resolver:86"
       ]
     },
@@ -1002,18 +1002,18 @@
         "cdk.api.request:208",
         "cdk.api.request:256",
         "cdk.api.request:261",
-        "cdk.sql.generic:2454"
+        "cdk.sql.generic:2464"
       ],
       "operator": [
         "cdk.api.request:194",
         "cdk.api.request:208",
         "cdk.api.request:258",
         "cdk.api.request:261",
-        "cdk.sql.generic:2454"
+        "cdk.sql.generic:2464"
       ],
       "value": [
         "cdk.api.request:191",
-        "cdk.sql.generic:2454"
+        "cdk.sql.generic:2464"
       ]
     },
     "analitiq.contracts.stream.FnExpression": {
@@ -1040,7 +1040,7 @@
         "cdk.api.generic:606",
         "cdk.api.generic:613",
         "cdk.api.generic:871",
-        "cdk.sql.generic:2128",
+        "cdk.sql.generic:2138",
         "src.engine.pipeline_config_prep:157"
       ],
       "method": [
@@ -1056,12 +1056,12 @@
     },
     "analitiq.contracts.stream.KeysetDatabasePagination": {
       "order_by_field": [
-        "cdk.sql.generic:2145"
+        "cdk.sql.generic:2155"
       ]
     },
     "analitiq.contracts.stream.OffsetDatabasePagination": {
       "order_by_field": [
-        "cdk.sql.generic:2145"
+        "cdk.sql.generic:2155"
       ]
     },
     "analitiq.contracts.stream.PipeExpression": {
@@ -1094,7 +1094,7 @@
     },
     "analitiq.contracts.stream.StreamSource": {
       "database_pagination": [
-        "cdk.sql.generic:2143"
+        "cdk.sql.generic:2153"
       ],
       "endpoint_ref": [
         "cdk.api.generic:209",
@@ -1102,18 +1102,18 @@
       ],
       "filters": [
         "cdk.api.generic:540",
-        "cdk.sql.generic:2119"
+        "cdk.sql.generic:2129"
       ],
       "primary_keys": [
         "src.engine.pipeline_config_prep:581"
       ],
       "replication": [
         "cdk.api.generic:573",
-        "cdk.sql.generic:2126",
+        "cdk.sql.generic:2136",
         "src.engine.pipeline_config_prep:151"
       ],
       "selected_columns": [
-        "cdk.sql.generic:2440"
+        "cdk.sql.generic:2450"
       ]
     },
     "analitiq.contracts.stream.StreamValidationErrorHandling": {
@@ -1687,7 +1687,7 @@
     "analitiq.contracts.endpoints.Column": {
       "consumer": "cdk.schema_contract",
       "dumps": [
-        "cdk.sql.generic:292"
+        "cdk.sql.generic:296"
       ],
       "entries": []
     },

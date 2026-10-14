@@ -33,6 +33,14 @@ affects:
     pattern: "src/runner.py"
   - type: path
     pattern: "src/config/utils.py"
+  - type: path
+    pattern: "src/worker/source_service.py"
+  - type: path
+    pattern: "cdk/cdk/api/verdicts.py"
+  - type: path
+    pattern: "cdk/cdk/api/http.py"
+  - type: path
+    pattern: "cdk/cdk/sql/generic.py"
 assertions: []
 provenance:
   authoredBy: human

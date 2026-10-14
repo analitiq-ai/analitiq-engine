@@ -27,6 +27,18 @@ affects:
     pattern: "cdk/cdk/sql/capabilities.py"
   - type: path
     pattern: "cdk/cdk/sql/dialects.py"
+  - type: path
+    pattern: "cdk/cdk/conformance/declaration.py"
+  - type: path
+    pattern: "cdk/cdk/conformance/surface.py"
+  - type: path
+    pattern: "cdk/cdk/conformance/skips.py"
+  - type: path
+    pattern: "cdk/cdk/conformance/tier1/test_rendering.py"
+  - type: path
+    pattern: "cdk/cdk/conformance/tier2/live.py"
+  - type: path
+    pattern: "cdk/cdk/conformance/tier2/test_live.py"
 assertions: []
 provenance:
   authoredBy: human
