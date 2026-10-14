@@ -25,10 +25,9 @@ of `{type: path, pattern: <glob>}`; every pattern matches a real path"; `provena
 agent`; `status: draft` (automation creates `draft` only, FR-012); body sections Context,
 Decision, Options considered, Trade-offs, Consequences; no issue numbers, no `file.py:123`.
 
-**Citation rule for every migration task**: before deleting text, run
-`grep -rnE "<doc-filename>|ADR ?§" --include=*.py --include=*.md --include=*.toml .` (excluding
-`specs/`, `CHANGELOG.md`, `.venv`, `connectors/`) and repoint every hit to `ADR NNNN` in the same
-commit, runtime strings included.
+**Citation rule for every migration task**: before deleting text, run the search in
+`.claude/rules/documentation.md` ("Changing a doc means changing what cites it") for the document,
+and repoint each hit that cites it to `ADR NNNN` in the same commit, runtime strings included.
 
 ## Phase 1: Setup (PR 1)
 
@@ -50,8 +49,8 @@ Principle VI).
 
 **⚠️ CRITICAL**: No record may be written or migrated until this PR merges.
 
-- [ ] T006 Rewrite the "An ADR stops being an ADR the moment it ships" section of `.claude/rules/documentation.md`: records in `docs/adr/` keep Context/Decision/Options/Consequences after shipping, an accepted record's decision text is never edited (fixing a link or citation is allowed), a changed decision is a new record that supersedes it, and behaviour is cited as `ADR NNNN` rather than a doc section number
-- [ ] T007 Open PR 2 containing only `.claude/rules/documentation.md`
+- [X] T006 Rewrite the "An ADR stops being an ADR the moment it ships" section of `.claude/rules/documentation.md`: records in `docs/adr/` keep Context/Decision/Options/Consequences after shipping, an accepted record's decision text is never edited (fixing a link or citation is allowed), a changed decision is a new record that supersedes it, and behaviour is cited as `ADR NNNN` rather than a doc section number
+- [X] T007 Open PR 2 containing `.claude/rules/documentation.md` and this file's T006–T007 ticks
 
 **Checkpoint**: Records can now be written.
 
@@ -178,7 +177,7 @@ FR-011). PR 5 can land any time after PR 4, PR 5b after PR 5; PR 16 lands after 
 
 - [ ] T046 Run all quickstart.md scenarios against `main`
 - [ ] T047 Ratify: maintainer moves each new record in `docs/adr/` from `draft → proposed → accepted` (FR-012; not automated); `adr lint` stays green
-- [ ] T048 Citation resolution (SC-004): `grep -rnoE "ADR ?[0-9]{4}" --include=*.py --include=*.md --include=*.toml .` (excluding `specs/`, `CHANGELOG.md`, `.venv`, `connectors/`, `node_modules/`); every cited id has a file matching `docs/adr/<id>-*.md`; zero misses, and zero remaining `ADR ?§` hits
+- [ ] T048 Citation resolution (SC-004): `grep -rnoE "ADR ?[0-9]{4}" --include=*.py --include=*.md --include=*.toml .` (excluding `specs/`, `CHANGELOG.md`, `.venv`, `connectors/`, `node_modules/`); every cited id has a file matching `docs/adr/<id>-*.md`; zero misses; and the citation-rule search above, with `<doc-stem>` replaced by the alternation of every migrated document's stem, returns no hit that still cites a migrated document
 - [ ] T049 Update the stale FR-009 note in `specs/001-adr-governance/checklists/requirements.md`; close #570
 
 ---

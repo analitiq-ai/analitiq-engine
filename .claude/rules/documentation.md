@@ -24,22 +24,34 @@ Applies when writing or editing any Markdown document in this repo.
   becomes a lie.
 - **Never cross-link a public repo's docs to a private tracker** (`<private-repo>#123`).
   That leaks internal references into public code.
+- **Decision records in `docs/adr/` are exempt from the migration and "today"
+  bullets above**, not from the issue-number or private-tracker bans. Each must
+  carry a `date` and state what was true and what was decided on it; the
+  current state is the set of accepted records that nothing supersedes.
 
-## An ADR stops being an ADR the moment it ships
+## A decision record keeps its decision after it ships
 
-- If code, tests, or runtime error messages cite a document as the authority
-  for behavior, it is a **spec**, not a proposal. Rewrite it in the present
-  tense and drop the proposal scaffolding — Problem/Migration/Consequences
-  framing, future tense, "the implementing PRs will".
-- **Section numbers in such a document are an API.** Docstrings and error
-  messages cite them by number. Grep the source before renumbering; a shifted
-  section silently sends a connector author to the wrong rule.
+- **Decision records live in `docs/adr/`** and keep Context, Decision, Options
+  considered, and Consequences after the decision ships. They are never
+  rewritten into present-tense specs.
+- **An accepted record's body is never edited**, except to fix a link or a
+  citation. A changed decision is a new record that supersedes the old one.
+- **Code, docstrings, runtime error text, and Markdown cite a record as
+  `ADR NNNN`** (in Markdown, linked to its file), never a section inside it.
+- **A record is never renamed or deleted.** Its id and filename are permanent,
+  so citations to it never break; a withdrawn decision becomes `deprecated` or
+  `superseded`, never a missing file.
+- **Superseding a record moves only the citations of behavior the new record
+  now governs**, in the same commit. The `supersedes`/`supersededBy` pair and
+  historical mentions keep pointing at the old id.
 
 ## Never version the filename
 
 `sql-write-path-v2.md` is wrong even though no v1 existed. Filename versioning
 guarantees either a stale `-v2` describing v3, or two files where one belongs.
-The document is the current design; git holds the previous one.
+The document is the current design; git holds the previous one. A superseded
+decision record is not a version: it keeps its own id beside the record that
+supersedes it.
 
 ## Point only at things that survive
 
@@ -70,6 +82,15 @@ elsewhere in the same document.
 
 ## Changing a doc means changing what cites it
 
-Before renaming or moving a document, grep for it across `*.py`, `*.md` and
-tests. A rename updates every citation in the same commit — this repo had 29
-citations to one document, including runtime error strings.
+Before renaming, moving, or renumbering the sections of a document, search the
+whole tracked tree with its filename stem (`sql-write-path` for
+`docs/data-path/sql-write-path.md`) in place of `<doc-stem>`:
+
+```shell
+git grep -niE '<doc-stem>|§ ?[0-9]|\bsections? [0-9]|\bs\.[0-9]' -- ':!specs' ':!CHANGELOG.md'
+```
+
+A citation can leave the document's name out (`ADR s.10`), so match every
+section-marker hit to the document it cites. The change updates every citation
+of the document in the same commit — this repo had 29 citations to one
+document, including runtime error strings.
