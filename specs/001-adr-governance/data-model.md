@@ -71,26 +71,26 @@ Source doc = the doc whose migration PR lands the record. `(u)` = path to verify
 
 | # | Decision | Source doc | `affects` |
 |---|---|---|---|
-| N1 | Persist only the destination-acked cursor and resume inclusively | engine-architecture | `src/engine/stream_processor.py`, `src/engine/batch_policy.py`, `src/grpc/cursor.py`, `src/state/**` |
+| N1 | Persist only the destination-acked cursor and resume inclusively | engine-architecture | `src/engine/stream_processor.py`, `src/engine/batch_policy.py`, `src/grpc/cursor.py`, `src/state/state_manager.py`, `src/state/store.py` (u) |
 | N2 | Reach exactly one verdict per batch, in BatchPolicy | grpc-streaming | `src/engine/batch_policy.py`, `src/engine/stream_processor.py`, `src/grpc/client.py` |
-| N3 | Keep one batch in flight, acked in order, with an opaque cursor and content-derived row idempotency | grpc-streaming | `src/grpc/**`, `src/destination/server.py`, `cdk/cdk/base_handler.py`, `cdk/cdk/sql/generic.py` |
+| N3 | Keep one batch in flight, acked in order, with an opaque cursor and content-derived row idempotency | grpc-streaming | `src/grpc/client.py`, `src/grpc/cursor.py`, `src/destination/server.py`, `cdk/cdk/base_handler.py`, `cdk/cdk/sql/generic.py` |
 | N4 | Carry the ack budget on the handshake and derive the statement timeout from it | grpc-streaming | `src/grpc/client.py`, `src/destination/server.py`, `cdk/cdk/sql/generic.py` |
 | N5 | Do not set client keepalive on the engine-destination channel | grpc-streaming | `src/grpc/client.py`, `src/destination/server.py` |
 | N6 | Keep ErrorCode an add-only published contract; error_detail carries class names only | engine-architecture | `src/state/error_classification.py` |
-| N7 | Classify failures where they occur; connectors declare facts, never verdicts | engine-architecture | `cdk/cdk/declarations.py` (u), `cdk/cdk/sql/**`, `src/state/error_classification.py` |
+| N7 | Classify failures where they occur; connectors declare facts, never verdicts | engine-architecture | `cdk/cdk/declarations.py` (u), `cdk/cdk/sql/generic.py`, `cdk/cdk/sql/adbc_backend.py`, `cdk/cdk/sql/_adbc_utils.py` (u), `src/state/error_classification.py` |
 | N8 | Bind SQL capabilities once; refuse undeclared shape facts | sql-write-path | `cdk/cdk/sql/dialects.py`, `cdk/cdk/sql/capabilities.py` |
 | N9 | Name stages hash-first, one cycle per backend under the write lock, poison per path | sql-write-path | `cdk/cdk/sql/stage_cycle.py`, `cdk/cdk/sql/*backend.py` |
 | N10 | Run exactly two SQL transports and dispatch, never fork | arrow-and-transport | `cdk/cdk/sql/*backend.py` |
-| N11 | Load connector code only in the worker; verify declared registry roles on load | engine-architecture | `cdk/cdk/registry.py`, `src/worker/**` (u) |
-| N12 | Depend one way, engine to CDK; connectors import no connector or runtime; engine is cloud-agnostic | connector-module | `cdk/cdk/**`, `src/**` |
+| N11 | Load connector code only in the worker; verify declared registry roles on load | engine-architecture | `cdk/cdk/registry.py`, `src/worker/bootstrap.py` (u), `src/worker/spawn.py` (u) |
+| N12 | Depend one way, engine to CDK; connectors import no connector or runtime; engine is cloud-agnostic | connector-module | `cdk/pyproject.toml` (u), `pyproject.toml` (u) |
 | N13 | Lazy-import transports by extra and fail naming the missing extra | connector-module | `cdk/cdk/registry.py`, `cdk/cdk/_extras.py` (u) |
-| N14 | Resolve transports and secrets engine-side; keep each operation within its transport's origin | source-config | `cdk/cdk/connection_runtime.py` (u), `cdk/cdk/secrets/**` (u), `cdk/cdk/api/**` |
+| N14 | Resolve transports and secrets engine-side; keep each operation within its transport's origin | source-config | `cdk/cdk/connection_runtime.py` (u), `cdk/cdk/secrets/protocol.py`, `cdk/cdk/secrets/resolvers/scheme.py`, `cdk/cdk/api/urls.py` |
 | N15 | Enforce param keywords with the reference JSON Schema implementation; never render a refused value | source-config | `cdk/cdk/api/param_rules.py` |
-| N16 | Decide every type conversion from one published matrix generated from ARROW_FAMILIES | arrow-and-transport | `cdk/cdk/type_map/**`, `packages/conversion-matrix/**` |
+| N16 | Decide every type conversion from one published matrix generated from ARROW_FAMILIES | arrow-and-transport | `cdk/cdk/type_map/arrow.py`, `cdk/cdk/type_map/conversions.py`, `cdk/cdk/type_map/grammar.py`, `packages/conversion-matrix/scripts/build.mjs` (u) |
 | N17 | Compile mappings once; reject a batch wholesale, strictest strategy wins | mapping-and-transformations | `src/engine/mapping.py` (u), `src/engine/batch_policy.py` |
 | N18 | Keep the safety window and runtime defaults in the engine, resolved runtime block > env > default | settings-reference | `src/config/settings.py`, `src/engine/pipeline_config_prep.py` |
-| N19 | Fail a conformance run that assesses nothing for the connector's kind | conformance-kit | `cdk/cdk/conformance/**`, `tests/conformance_kit/**` |
-| N20 | Commit generated bindings and artifacts and verify them in the built package | connector-module | `proto/**` (u), `src/grpc/generated/**` (u), `tools/contract_consumption.py` |
+| N19 | Fail a conformance run that assesses nothing for the connector's kind | conformance-kit | `cdk/cdk/conformance/applicability.py`, `cdk/cdk/conformance/target.py` (u) |
+| N20 | Commit generated bindings and artifacts and verify them in the built package | connector-module | `proto/generate.sh`, `tests/unit/grpc_tests/test_generated_protos.py`, `.github/workflows/publish-cdk.yml`, `tools/contract_consumption.py` |
 
 Remaining inventoried rules (intra-batch duplicates, transactional DDL, handler `land` vs
 `write_batch`, credentials never cross gRPC, etc.) are assigned during each doc's migration:

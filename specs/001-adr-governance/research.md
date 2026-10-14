@@ -43,7 +43,7 @@
 - **Decision**: `adr migrate --from madr`, then set per record: quoted `id`, `status: accepted`,
   real `date` from the commit that introduced the rule (not the file-add commit: 0003–0006 were
   added together by a docs move), `deciders: ["@Analitiq-Bot-Wonka"]`, and
-  `affects` path globs that match real paths.
+  `affects` per data-model.md's governed-paths rule.
 - **Rationale**: dry run migrated all six with only date/status warnings; schema requires `id`,
   `title`, `status`, `date`; accepted requires `deciders`.
 - **Correction folded in**: ADR 0006 says a fatally rejected coalesced unit is "DLQ'd or skipped
