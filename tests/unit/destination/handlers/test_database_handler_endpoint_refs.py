@@ -711,8 +711,8 @@ class TestPrepareWriteBatch:
 
     @pytest.mark.parametrize("mode", ["upsert", "truncate_insert"])
     def test_upsert_and_full_refresh_never_collapse(self, mode):
-        # ADR §2: duplicate conflict_keys inside one source batch keep the
-        # system's own loud failure for upsert (no collapse rule can be
+        # sql-write-path §2: duplicate conflict_keys inside one source batch are
+        # left to the system's merge for upsert (no collapse rule can be
         # correct), and deduping a full refresh would drop legitimate
         # duplicate rows. Only insert collapses.
         import pyarrow as pa

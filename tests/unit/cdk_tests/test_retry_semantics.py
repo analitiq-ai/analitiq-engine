@@ -1,8 +1,9 @@
 """Per-stream retry-safety verdicts (issue #286).
 
 Every destination handler reports, per configured stream, whether a
-same-``RUN_ID`` restart can duplicate writes. The SQL verdict is write
-mode x key aware and transport-independent (stage-then-merge, ADR
+same-``RUN_ID`` restart can duplicate writes. The SQL verdict
+follows the write mode and whether the system enforces row identity
+(``pk_not_enforced``), on either transport (stage-then-merge, spec
 sql-write-path §9); file writes content-addressed files; stdout has
 nothing to dedup with. The base default is the only honest claim for a
 handler that declares nothing: at-least-once.
@@ -135,11 +136,11 @@ class TestSqlVerdicts:
         assert GenericSQLConnector.RECORD_HASH_COLUMN in verdict.reason
 
     def test_insert_on_unenforced_pk_system_at_least_once(self):
-        """The honest-verdict rule (ADR §9): the anti-join dedups every
+        """The honest-verdict rule (spec sql-write-path §9): the anti-join dedups every
         sequential replay, but a system that does not enforce the
         identity constraint (``pk_not_enforced`` — BigQuery) has a
-        filter, not a guarantee, so its insert streams must not promise
-        exactly-once."""
+        filter, not a guarantee, so a keyed insert stream on it must not
+        promise exactly-once."""
         from cdk.sql.dialects import SqlDialect
 
         class _UnenforcedPkDialect(SqlDialect):

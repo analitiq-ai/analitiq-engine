@@ -5,7 +5,7 @@ the connector class carries ``dialect_class`` and nothing else, and the
 dialect implements exactly the hooks its declaration
 (``reference/definition/connector.json``) routes calls to. It lives in
 the engine repo's tests — the CDK itself ships no per-system dialect —
-and doubles as the worked example of the post-ADR override surface.
+and doubles as the worked example of that override surface.
 """
 
 from __future__ import annotations

@@ -931,7 +931,7 @@ class TestDdlAndProbes:
 
 
 class TestWholeCycleMutualExclusion:
-    """ADR §6: a retry only ever meets a completed or abandoned stage,
+    """sql-write-path §6: a retry only ever meets a completed or abandoned stage,
     never a live one. On this backend the guarantee is the op lock held
     by the worker thread for the whole cycle — a second cycle must
     perform no statements until the first finishes, even if the first

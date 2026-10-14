@@ -7,10 +7,12 @@ transport-agnostic executor (``cdk.sql.execution``) and map each native column
 type to its ``arrow_type`` via the connection-scoped **read** type-map
 (``runtime.type_mapper_for(scope=CONNECTION)`` — connection rules first, the
 connector map filling the gaps; issue #368) — so a ``ColumnDef`` carries the
-``arrow_type`` ``create_table`` consumes downstream (ADR §6, CONFIRM-1), not
-the raw native string. Discovery introspects the connection's own database, so
-its objects are private endpoints by definition and the connection scope is
-inherent, not a caller choice.
+``arrow_type`` ``create_table`` consumes downstream, not the raw native string
+(``docs/architecture/connector-module-architecture.md``,
+"The registry, discovery, and control-plane operations"). Discovery
+introspects the connection's own database, so its objects are private
+endpoints by definition and the connection scope is inherent, not a caller
+choice.
 
 No gRPC server, engine state, or orchestration is involved: the control-plane
 calls these directly.

@@ -25,8 +25,8 @@ lock serializes ALL cursor work on the cached connection. The whole stage
 cycle runs on a worker thread holding that lock, which is also what makes
 retries safe against a still-running prior attempt: the thread itself
 releases the lock, so a cancelled ``await`` leaves the cycle running to
-completion and the retry's cycle blocks until it finishes (the ADR §6
-mutual-exclusion rule) — no asyncio shielding needed.
+completion and the retry's cycle blocks until it finishes (the sql-write-path
+§6 mutual-exclusion rule) — no asyncio shielding needed.
 """
 
 from __future__ import annotations
@@ -225,7 +225,7 @@ class AdbcBackend(TransportBackend):
         """Run one full stage cycle for *batch* on a worker thread.
 
         The thread cannot be cancelled in-band: it finishes or abandons
-        its cycle under the op lock (the ADR §6 mutual-exclusion rule),
+        its cycle under the op lock (the sql-write-path §6 mutual-exclusion rule),
         so a cancelled ``await`` needs no shielding for correctness — but
         the abandoned attempt's own failure must still reach the log
         with its stage context instead of vanishing into asyncio's

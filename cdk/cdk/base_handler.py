@@ -33,9 +33,11 @@ if TYPE_CHECKING:
 
 # ``BatchWriteResult``, ``Cursor`` and ``SchemaSpec`` are CDK-native value types
 # (``cdk.types``), decoupled from the gRPC messages this module once imported —
-# the CDK must not depend on ``src/grpc`` (ADR §4.1). The engine's gRPC server
-# translates protobuf <-> these types at the wire boundary. ``BatchWriteResult``
-# is re-exported here because handlers/tests import it as
+# the CDK must not depend on ``src/grpc`` (see
+# ``docs/architecture/connector-module-architecture.md``, "The boundary").
+# The engine's gRPC server translates protobuf <-> these types at the wire
+# boundary. ``BatchWriteResult`` is re-exported here because handlers/tests
+# import it as
 # ``from cdk.base_handler import BaseDestinationHandler, BatchWriteResult``.
 __all__ = [
     "BaseDestinationHandler",
