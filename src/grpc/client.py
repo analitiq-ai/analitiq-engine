@@ -1100,8 +1100,9 @@ def generate_record_id(
     row hashes to the same id across attempts and across an inclusive cursor
     re-read. The API destination names its failed rows by it, and an
     insert-mode API endpoint that declares an idempotency key and sends one
-    record per request uses it as that key; a positional ``(run_id, stream_id, batch_seq)`` key would mis-key a same-run
-    retry from an advanced cursor (issue #282). The SQL ``_record_hash`` is not
+    record per request uses it as that key; a positional
+    ``(run_id, stream_id, batch_seq)`` key would mis-key a same-run retry from
+    an advanced cursor (issue #282). The SQL ``_record_hash`` is not
     this id: the SQL write path digests the row after the cast to the
     destination schema.
 
