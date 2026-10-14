@@ -8,8 +8,9 @@ in-process stand-in for a sync-only dialect, so these tests exercise the
 real stage-then-merge machinery end to end — actual SQL against an actual
 database, not mocks of the engine surface.
 
-The write path is stage-then-merge (issue #388): every batch lands in a
-per-batch stage table and exactly one mode statement applies it. The test
+The write path is stage-then-merge (issue #388): every batch that carries
+rows lands in a per-batch stage table and exactly one mode statement
+applies it. The test
 dialect declares its capabilities the way a connector package does and
 implements the two rendering hooks the primitive needs.
 """

@@ -15,11 +15,15 @@ The active transport is selected by the connector definition and set on the
 engine) or ``transport_type: "adbc"`` (direct ADBC DBAPI). Type casting is
 handled by the Arrow-based ``SchemaContract``.
 
-Writes are stage-then-merge on both transports (spec sql-write-path):
-this facade owns the semantics — write modes, identity and duplicate
-rules, refusals, retry verdicts, timeouts — and hands each batch to the
-runtime-selected :class:`~cdk.sql.backend.TransportBackend`
-(``SqlAlchemyBackend`` or ``AdbcBackend``) as a ``StageWritePlan``.
+A write of a batch that carries rows is stage-then-merge on both
+transports (spec sql-write-path): this facade owns the semantics — write
+modes, identity and duplicate rules, refusals, retry verdicts, timeouts —
+and hands each such batch to the runtime-selected
+:class:`~cdk.sql.backend.TransportBackend` (``SqlAlchemyBackend`` or
+``AdbcBackend``) as a ``StageWritePlan``. A batch with no rows never
+reaches the backend's stage cycle: the first one of a ``truncate_insert``
+refresh runs the dialect's ``empty_table_sql`` through the backend's
+``run_ddl``, with no stage table.
 
 This base is vendor-neutral: every per-system quirk (quoting, the
 merge-form upsert statement, pre-DDL, stage-table syntax, discovery
@@ -340,11 +344,14 @@ class GenericSQLConnector(BaseDestinationHandler):
       (Postgres asyncpg, MySQL aiomysql) run on an ``AsyncEngine``;
       sync-only drivers (Redshift ``redshift_connector``) run on a plain
       sync ``Engine`` whose operations are dispatched via
-      ``asyncio.to_thread``. Writes are stage-then-merge, executed by
-      ``SqlAlchemyBackend`` from a ``StageWritePlan`` this facade builds:
-      the batch lands in a per-batch stage table, then exactly one mode
-      statement applies it (set-based anti-join for insert, the dialect's
-      declared merge form for upsert, plain append for truncate_insert).
+      ``asyncio.to_thread``. A batch that carries rows is written
+      stage-then-merge, executed by ``SqlAlchemyBackend`` from a
+      ``StageWritePlan`` this facade builds: the batch lands in a
+      per-batch stage table, then exactly one mode statement applies it
+      (set-based anti-join for insert, the dialect's declared merge form
+      for upsert, plain append for truncate_insert). The first batch of
+      a ``truncate_insert`` refresh with no rows only empties the
+      target, through ``empty_table_sql`` and no stage table.
       Both flavours run one shared sync-``Connection`` cycle body (the
       async path enters it through ``AsyncConnection.run_sync``), so
       DML/DDL semantics are identical. DDL via rendered ``CREATE TABLE``
@@ -693,9 +700,10 @@ class GenericSQLConnector(BaseDestinationHandler):
     def _dialect_renders_stage_table(self) -> bool:
         """Whether this connector's dialect renders the stage DDL.
 
-        Every SQLAlchemy-path write lands in a stage table, so a
-        write-role connector without ``stage_table_sql`` cannot write at
-        all — checked at handshake, alongside the declared stage shape.
+        Every write of a batch that carries rows lands in a stage table,
+        so a write-role connector without ``stage_table_sql`` cannot write
+        rows at all — checked at handshake, alongside the declared stage
+        shape.
         Read off ``dialect_class`` for the same reason as the merge hook.
         """
         return dialect_overrides(self.dialect_class, "stage_table_sql")
@@ -1235,13 +1243,13 @@ class GenericSQLConnector(BaseDestinationHandler):
     def _check_stage_capabilities(self, stream_id: str, address: TableAddress) -> None:
         """Refuse a write stream the stage cycle cannot run (any transport).
 
-        Stage-then-merge is the only write shape: the batch lands in a
-        stage whose scope and transaction shape come from the declared
-        ``sql_capabilities.stage`` block and whose DDL renders through the
-        dialect's ``stage_table_sql``. Undeclared refuses naming the
-        missing declaration; a declaration the dialect cannot render
-        refuses naming the disagreement — at handshake, never on the
-        first batch.
+        Stage-then-merge is the only write shape for a batch that carries rows:
+        the batch lands in a stage whose scope and transaction shape come from
+        the declared ``sql_capabilities.stage`` block and whose DDL renders
+        through the dialect's ``stage_table_sql``. Undeclared refuses naming
+        the missing declaration; a declaration the dialect cannot render
+        refuses naming the disagreement — at handshake, never on the first
+        batch.
         """
         if self._capabilities is None:
             raise SchemaConfigurationError(

@@ -66,7 +66,10 @@ in [`sql-write-path.md`](sql-write-path.md).
 incoming batch (`SchemaContract.cast_arrow_batch`), builds a
 `StageWritePlan`, and hands it to the runtime-selected transport backend's
 `execute_write`, which lands the batch into a per-batch stage table and
-runs one mode statement from stage to target. Full mechanics — the
+runs one mode statement from stage to target. A batch with no rows never
+reaches the backend's stage cycle: the first one of a `truncate_insert`
+refresh only empties the target, through the dialect's `empty_table_sql`.
+Full mechanics — the
 facade/backend split, the stage lifecycle, transaction boundaries — are
 [`sql-write-path.md`](sql-write-path.md)'s.
 

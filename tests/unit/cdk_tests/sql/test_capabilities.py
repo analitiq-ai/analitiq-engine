@@ -240,8 +240,8 @@ class TestConfigureSchemaUpsertGate:
 
     @pytest.mark.asyncio
     async def test_undeclared_block_refuses_any_sqlalchemy_write(self):
-        # Not just upsert: every SQLAlchemy-path write lands in a stage,
-        # so an undeclared block refuses insert streams too — at
+        # Not just upsert: every write of a batch that carries rows lands
+        # in a stage, so an undeclared block refuses insert streams too — at
         # handshake, naming the missing declaration.
         handler = _upsert_handler()
         spec = SchemaSpec(
