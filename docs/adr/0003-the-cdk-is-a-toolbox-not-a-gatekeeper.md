@@ -1,3 +1,22 @@
+---
+schemaVersion: 0.2.0
+id: "0003"
+title: "The CDK is a toolbox, not a gatekeeper"
+status: accepted
+date: 2026-06-04
+deciders: ["@Analitiq-Bot-Wonka"]
+tags: [cdk, connectors]
+scope: domain
+reversibility: one-way-door
+blastRadius: cross-team
+relatesTo: []
+affects:
+  - type: path
+    pattern: "cdk/**"
+provenance:
+  authoredBy: human
+---
+
 # ADR 0003: The CDK is a toolbox, not a gatekeeper
 
 The Connector CDK is vendor-neutral machinery a connector uses — the

@@ -1,3 +1,24 @@
+---
+schemaVersion: 0.2.0
+id: "0001"
+title: "Two failure vocabularies, one adapter"
+status: accepted
+date: 2026-07-31
+deciders: ["@Analitiq-Bot-Wonka"]
+tags: [errors, contracts]
+scope: domain
+reversibility: one-way-door
+blastRadius: cross-team
+relatesTo: []
+affects:
+  - type: path
+    pattern: "src/state/error_classification.py"
+  - type: path
+    pattern: "cdk/cdk/types.py"
+provenance:
+  authoredBy: human
+---
+
 # ADR 0001: Two failure vocabularies, one adapter
 
 The engine carries two enums for failure. `FailureCategory` crosses the wire on
