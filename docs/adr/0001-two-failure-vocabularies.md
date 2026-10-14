@@ -16,31 +16,53 @@ relatesTo: []
 conflictsWith: []
 affects:
   - type: path
-    pattern: "src/state/error_classification.py"
+    pattern: "cdk/cdk/api/dialects.py"
+  - type: path
+    pattern: "cdk/cdk/api/generic.py"
+  - type: path
+    pattern: "cdk/cdk/api/http.py"
+  - type: path
+    pattern: "cdk/cdk/api/verdicts.py"
+  - type: path
+    pattern: "cdk/cdk/base_handler.py"
+  - type: path
+    pattern: "cdk/cdk/conformance/surface.py"
+  - type: path
+    pattern: "cdk/cdk/declarations.py"
+  - type: path
+    pattern: "cdk/cdk/file/generic.py"
+  - type: path
+    pattern: "cdk/cdk/sql/adbc_backend.py"
+  - type: path
+    pattern: "cdk/cdk/sql/generic.py"
+  - type: path
+    pattern: "cdk/cdk/stdout/generic.py"
   - type: path
     pattern: "cdk/cdk/types.py"
   - type: path
     pattern: "proto/analitiq/v1/stream.proto"
   - type: path
-    pattern: "src/grpc/client.py"
+    pattern: "src/config/utils.py"
   - type: path
-    pattern: "src/worker/readable.py"
+    pattern: "src/destination/server.py"
   - type: path
-    pattern: "cdk/cdk/declarations.py"
+    pattern: "src/engine/batch_policy.py"
+  - type: path
+    pattern: "src/engine/exceptions.py"
   - type: path
     pattern: "src/engine/stream_processor.py"
   - type: path
+    pattern: "src/grpc/client.py"
+  - type: path
     pattern: "src/runner.py"
   - type: path
-    pattern: "src/config/utils.py"
+    pattern: "src/state/error_classification.py"
+  - type: path
+    pattern: "src/worker/proxy.py"
+  - type: path
+    pattern: "src/worker/readable.py"
   - type: path
     pattern: "src/worker/source_service.py"
-  - type: path
-    pattern: "cdk/cdk/api/verdicts.py"
-  - type: path
-    pattern: "cdk/cdk/api/http.py"
-  - type: path
-    pattern: "cdk/cdk/sql/generic.py"
 assertions: []
 provenance:
   authoredBy: human
