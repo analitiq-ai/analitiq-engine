@@ -50,7 +50,7 @@ CHECK = "override-surface"
 #: factory whose catalog gate must not be bypassed by a subclass.
 #: Everything else public on the base is the sanctioned extension surface
 #: (the class docstring calls it "the complete extension surface", and
-#: the ADR pins it).
+#: sql-write-path section 4 pins it).
 FRAMEWORK_OWNED_DIALECT_ATTRS = frozenset(
     {"capabilities", "for_runtime", "table_address"}
 )
@@ -497,8 +497,9 @@ def _audit_connector_class(connector_cls: type) -> list[Violation]:
                         f"{klass.__name__}.{name} overrides a "
                         f"GenericSQLConnector member; the facade's semantics "
                         f"are defined once in the CDK, and the per-system "
-                        f"surface is the dialect (spec sql-write-path "
-                        f"section 4). The connector class may only define "
+                        f"surface is the dialect (ADR 0005; spec "
+                        f"sql-write-path section 4). The connector class "
+                        f"may only define "
                         f"{' and '.join(sorted(CONNECTOR_CLASS_ALLOWED_ATTRS))} "
                         f"(section 5 sanctions classify_error) — move any "
                         f"other quirk onto the dialect's sanctioned hooks.",

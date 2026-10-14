@@ -284,6 +284,9 @@ class DestinationGRPCClient:
         Returns:
             True if connection successful and destination is healthy
         """
+        # No grpc.keepalive_* options: DestinationGRPCServer's ping limits answer
+        # a pinging client with GOAWAY ("too many pings"), tearing down the stream
+        # mid-batch.
         options = [
             ("grpc.max_send_message_length", self.max_message_size),
             ("grpc.max_receive_message_length", self.max_message_size),
@@ -1095,11 +1098,12 @@ def generate_record_id(
     The id is a function of the record's content alone -- never the run, the
     batch sequence, or the row's offset in the batch -- so the same logical
     row hashes to the same id across attempts and across an inclusive cursor
-    re-read. That is what lets a destination enforce idempotency on row
-    identity (a keyed MERGE, or the synthetic ``_record_hash`` column for a
-    keyless insert) instead of a positional ``(run_id, stream_id, batch_seq)``
-    ledger, which a same-run retry from an advanced cursor cannot key
-    correctly (issue #282).
+    re-read. The API destination names its failed rows by it, and an
+    insert-mode API endpoint that declares an idempotency key and sends one
+    record per request uses it as that key; a positional ``(run_id, stream_id, batch_seq)`` key would mis-key a same-run
+    retry from an advanced cursor (issue #282). The SQL ``_record_hash`` is not
+    this id: the SQL write path digests the row after the cast to the
+    destination schema.
 
     With ``primary_key_fields`` the id derives from those fields (the row's
     stable business key); without them it derives from the whole record, so
@@ -1108,12 +1112,12 @@ def generate_record_id(
     one. If the configured key fields are absent from the record -- a mapping
     renamed or dropped them, so the transformed row no longer carries them --
     the id falls back to the whole record. Without that fallback every row would
-    hash the same all-missing-key value, and the keyless ``_record_hash`` dedup
-    would collapse distinct rows to one and silently drop the rest.
+    hash the same all-missing-key value, so an API insert would send one
+    idempotency key for distinct rows and the provider would keep only the
+    first.
 
-    The full SHA-256 hex digest is returned (not truncated): it doubles as the
-    ``_record_hash`` dedup key for keyless inserts, where a truncated digest's
-    collision odds would silently drop legitimately-distinct rows.
+    The full SHA-256 hex digest is returned (not truncated): as an idempotency
+    key, a truncated digest's collision would silently drop a distinct row.
 
     Only the basis is chosen here; the canonicalisation is
     :func:`~cdk.record_identity.record_digest`, shared with every other

@@ -1,12 +1,11 @@
 # Connector Conformance Kit
 
 The CDK ships an acceptance suite for connector packages
-(`cdk.conformance`, installed with the `conformance` extra). Every
-connector repo runs it in its own CI against the pinned CDK version, so
-a CDK change that breaks a connector — or a connector change that
-breaks its contract — turns that connector's CI red before release, not
-in a customer pipeline (spec
-[sql-write-path](../data-path/sql-write-path.md) §10).
+(`cdk.conformance`, installed with the `conformance` extra), run in each
+connector repo's CI (see
+[ADR 0021](../adr/0021-connectors-are-certified-by-the-cdk-conformance-kit-in-their-own-ci.md)).
+What it asserts about the SQL write primitive is in
+[sql-write-path](../data-path/sql-write-path.md) §10.
 
 ## What each tier certifies
 
@@ -19,32 +18,31 @@ in a customer pipeline (spec
   target-emptying statement is DELETE-shaped, never `TRUNCATE`;
   identical batches build identical plans (self-healing retries) and
   distinct batches never share a stage name.
-- **Refusals fire.** Upsert with empty `conflict_keys`, catalog
-  addressing without a declaration (or against `catalog: "none"`) — a
-  loud error, never a guessed default.
-- **The override surface is the sanctioned one.** The connector class
-  carries `dialect_class` and, for a native error signal beyond the
-  declared `error_map` lookup, `classify_error` — nothing else; the
-  dialect's public namespace is exactly the public `SqlDialect`
-  surface, minus the
-  framework-owned members (`capabilities`, `for_runtime`,
-  `table_address`), with base-compatible signatures. The two that decide
-  the declaration — `capabilities` and `for_runtime` — are refused by
-  `SqlDialect` itself where the subclass is written, so the kit's finding
-  is a backstop for the rest, not the only thing standing between a
-  connector and its own binding site. Overriding a private CDK internal fails
-  with the member named, and so does a public addition of the
-  dialect's own — connector helpers live under a leading underscore,
-  which is what keeps stale hooks from older write paths from riding
-  along unnoticed. The write primitive's own protocol,
-  `StageConnection`, is implementable but is not connector surface: the
-  transports that satisfy it are the CDK's, so a connector growing its
-  members fails as the public addition it is.
-- **Declared and implemented agree, both ways.** A declared
-  `merge_form` needs `merge_statement_sql`; a `bulk_land` override
-  needs a declared `bulk_load` mechanism; a write-capable connector
-  (a database connector that ships a write type map) needs a
-  `sql_capabilities` block and `stage_table_sql`.
+- **Refusals fire.** Upsert with empty `conflict_keys`, and catalog
+  addressing without a declaration (or against `catalog: "none"`), both
+  raise (see
+  [ADR 0005](../adr/0005-stage-then-merge-is-the-single-sql-write-primitive.md)).
+- **The override surface is the sanctioned one** (see
+  [ADR 0019](../adr/0019-resolve-a-connector-by-kind-then-connector-id-with-a-generic-class-per-kind.md)).
+  The dialect's public namespace is exactly the public `SqlDialect`
+  surface, minus the framework-owned members (`capabilities`,
+  `for_runtime`, `table_address`), with base-compatible signatures. The
+  two that decide the declaration — `capabilities` and `for_runtime` — are
+  refused by `SqlDialect` itself where the subclass is written, so the
+  kit's finding is a backstop for the rest, not the only thing standing
+  between a connector and its own binding site. Overriding a private CDK
+  internal fails with the member named, and so does a public addition of
+  the dialect's own; connector helpers live under a leading underscore.
+  The write primitive's own protocol, `StageConnection`, is implementable
+  but is not connector surface: the transports that satisfy it are the
+  CDK's, so a connector growing its members fails as the public addition
+  it is.
+- **Declared and implemented agree, both ways.** A declared `merge_form`
+  needs `merge_statement_sql`; a `bulk_land` override needs a declared
+  `bulk_load` mechanism; a write-capable connector (a database connector
+  that ships a write type map) needs a `sql_capabilities` block and
+  `stage_table_sql` (see
+  [ADR 0005](../adr/0005-stage-then-merge-is-the-single-sql-write-primitive.md)).
 - **Every connector states its type vocabulary.**
   The read map is what the engine maps discovered source types through,
   whatever the connector's kind: a database maps the `native_type`s
@@ -119,31 +117,29 @@ in a customer pipeline (spec
   opened by the first read that dispatches through it and stops exactly
   those reads.
 
-**Tier 2 — live tests** (`cdk.conformance.tier2`, the connector's
-system as a CI service container): all three write modes end-to-end
-through `connect` / `configure_schema` / `write_batch`, read-back and
-incremental resume through `read_batches`, and replay — each phase on a
-fresh connector instance over a fresh connection, so every test also
-certifies a restart. A replayed batch must leave the target unchanged
-for the exactly-once modes. For a connector declaring a bulk mechanism,
-the same batch is landed once through the declared mechanism and once
-through executemany (a probe whose declaration is doctored to no bulk),
-and the two targets must be identical — landing is a pure speed slot, certified
-where it can actually execute (native bulk protocols cannot run against
-generic fakes, so this assertion lives in the live tier, not the
-contract tier).
+**Tier 2 — live tests** (`cdk.conformance.tier2`, the connector's system
+as a CI service container; see
+[ADR 0021](../adr/0021-connectors-are-certified-by-the-cdk-conformance-kit-in-their-own-ci.md)):
+`insert`, `truncate_insert` and, unless the connector declares `merge_form`
+`none`, `upsert`, end-to-end through `connect` / `configure_schema` /
+`write_batch`, read-back and incremental resume through `read_batches`,
+and replay — each phase on a fresh connector instance over a fresh
+connection, so a test that spans two phases also certifies a restart. A
+replayed batch must leave the target unchanged for the exactly-once modes.
+For a connector declaring a bulk mechanism for the transport the live
+connection uses, the same batch is written once with that declaration in
+place and once through executemany (a probe whose declaration is doctored
+to no bulk), and the two targets must be identical (see
+[ADR 0005](../adr/0005-stage-then-merge-is-the-single-sql-write-primitive.md));
+native bulk protocols cannot run against generic fakes, so this check is
+live-tier only.
 
-Cloud warehouses with no containerizable server (Snowflake, BigQuery,
-Redshift) run tier 1 only; that is an accepted residual risk.
-
-There is no live tier for `kind: api`, and that is a statement about the
-tier rather than a gap in it. The live tier's whole value is a round trip
-against the real system: a public CI carries no provider credentials, and
-a stub HTTP server would certify the connector's own fixtures rather than
-the provider — worse than nothing, because it reads green. So an api
-connector's tier-2 run skips, naming that reason, and the applicability
-gate below does not fire. Kind `api` is assessed in full at tier 1, where
-the read path is executed.
+Which systems run tier 1 only, and why `kind: api` has no live tier, is
+recorded in
+[ADR 0021](../adr/0021-connectors-are-certified-by-the-cdk-conformance-kit-in-their-own-ci.md).
+An api connector's tier-2 run skips, naming that reason, and the
+applicability gate below does not fire. Kind `api` is assessed in full at
+tier 1, where the read path is executed.
 
 ## What it cannot assess, it does not pass
 
@@ -181,32 +177,28 @@ class, and — for tier 2 — a live connection document
 (`--live-connection`).
 
 The class is resolved from the same `cdk.registry.KIND_DEFAULTS` table the
-engine registry reads, so what the suite audits is what production loads —
-but the precedence order differs from the engine's, because the two
-consumers have different needs: an explicit `--connector-class
-package.module:Class` wins (for running the suite before the package is
-installed), then the installed package's entry points, then the CDK's
-generic default for the connector's kind — the thin path, for every kind
-the CDK ships a default for. (The engine registry itself has no
-`--connector-class` override; see
+engine registry reads (see
+[ADR 0019](../adr/0019-resolve-a-connector-by-kind-then-connector-id-with-a-generic-class-per-kind.md)),
+but the precedence order differs from the engine's: an explicit
+`--connector-class package.module:Class` wins (for running the suite
+before the package is installed), then the installed package's entry
+points, then the CDK's generic default for the connector's kind — the thin
+path, for every kind the CDK ships a default for. (The engine registry
+itself has no `--connector-class` override; see
 [`connector-module-architecture.md`](../architecture/connector-module-architecture.md)
-for its own seeding order.) Both entry-point groups are read and must name the same class; a
-connector that registers a different class per role is refused at load,
-because a split there is how the two directions drift apart while the
-suite stays green. A kind the CDK ships no default for resolves no class
-and its class-level checks skip, so a genuinely new kind loads rather
-than failing. A kind whose default the install carries no transport for
-resolves no class either, and the reason travels on the target so a check
-that needs the class reports "not installed here" naming the extra —
-rather than skipping as though the kind were inapplicable. The api checks
-never ask for the class: they read the endpoint documents and drive the
-CDK's own read path, so they answer the same verdict whether or not a
-connector package is installed. The flags come from an
-options plugin loaded explicitly (`-p cdk.conformance.plugin` — it is
-deliberately not a `pytest11` entry point, so installing the CDK never
-changes unrelated pytest runs); each option doubles as an environment
-variable (`ANALITIQ_CONNECTOR_DIR`, `ANALITIQ_CONNECTOR_CLASS`,
-`ANALITIQ_LIVE_CONNECTION`), so a plugin-less run works identically.
+for its own seeding order.) Both entry-point groups are read, and a class
+registered in both must be the same class (see
+[ADR 0020](../adr/0020-one-connector-class-serves-both-read-and-write.md)). With
+no explicit class and no entry point, a kind the CDK ships no default for
+resolves no class, and so does a kind whose default the install carries no
+transport for. The api checks never use
+the class: they read the endpoint documents and drive the CDK's own read
+path. The flags come from an options plugin loaded explicitly (`-p
+cdk.conformance.plugin` — it is deliberately not a `pytest11` entry point,
+so installing the CDK never changes unrelated pytest runs); each option
+doubles as an environment variable (`ANALITIQ_CONNECTOR_DIR`,
+`ANALITIQ_CONNECTOR_CLASS`, `ANALITIQ_LIVE_CONNECTION`), so a plugin-less
+run works identically.
 
 The live connection document is a saved-connection-shaped JSON whose
 secrets come through the standard `secret_refs` schemes (`env:` /
@@ -266,17 +258,19 @@ jobs:
           --live-connection ci/live-connection.json
 ```
 
-An api connector's job is the tier-1 step alone, and it needs no service
-container and no `[api]` extra: the suite carries no live tier for the
-kind, and the checks it does carry run from the definition with no HTTP
-client installed.
+An api connector's job needs no service container and no `[api]` extra: it
+has no tier-2 step (see
+[ADR 0021](../adr/0021-connectors-are-certified-by-the-cdk-conformance-kit-in-their-own-ci.md)),
+and the tier-1 checks run from the definition with no HTTP client
+installed.
 
-Systems without a service container drop the tier-2 step; the tier-1
-step is mandatory in every connector repo whose kind the suite assesses. A job that *does* provision
-a container should also set `ANALITIQ_CONFORMANCE_REQUIRE_LIVE=1`
-(as the snippet's engine-side counterpart does): with it, a missing
-live connection fails the job instead of skipping, so a typo'd
-variable can never silently retire the live tier while CI stays green.
+Systems without a service container drop the tier-2 step (see
+[ADR 0021](../adr/0021-connectors-are-certified-by-the-cdk-conformance-kit-in-their-own-ci.md)).
+A job that *does* provision a container should also set
+`ANALITIQ_CONFORMANCE_REQUIRE_LIVE=1` (as the snippet's engine-side
+counterpart does): with it, a missing live connection fails the job
+instead of skipping, so a typo'd variable can never silently retire the
+live tier while CI stays green.
 
 The checks are also plain importable functions
 (`cdk.conformance.check_override_surface`,

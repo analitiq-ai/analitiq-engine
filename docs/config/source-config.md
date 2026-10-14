@@ -76,10 +76,8 @@ and [`destination-config.md`](destination-config.md#handler-registry).
   this rather than pulling in every format library transitively. No
   refusal renders the offending value in its message, since a param can
   carry a credential or continuation token.
-- Every pagination scheme runs on one loop, `cdk.api.PageLoop`, with one
-  adapter per scheme, and no page-size heuristic decides when a read ends;
-  see [ADR 0002](../adr/0002-one-stop-rule-for-every-paging-scheme.md) for
-  why the loop, not the scheme, owns termination.
+- Every pagination scheme runs on `cdk.api.PageLoop`, with one adapter per
+  scheme (see [ADR 0002](../adr/0002-one-stop-rule-for-every-paging-scheme.md)).
 - The engine binds both the stored-cursor lower bound and (for a window
   form) the run's upper bound through `replication.cursor_mappings`,
   rendered in the mapping's declared format. An incremental stream whose
@@ -89,14 +87,13 @@ and [`destination-config.md`](destination-config.md#handler-registry).
 ## Secret references
 
 `SchemeSecretsResolver` (`cdk/cdk/secrets/resolvers/scheme.py`) resolves
-each `secret_refs.<name>` engine-side, by the scheme the contract gives it.
-A `file:` path is scope-checked against the connection directory, so `..`
-cannot escape it. The `s3://` scheme lazily imports `boto3`, needs the
-`[s3]` extra, and honours `AWS_ENDPOINT_URL_S3` / `AWS_REGION` for an
-S3-compatible store. An unresolvable ref (a missing env var, file, object
-or sidecar entry, or an unsupported scheme) fails loud; the engine never
-falls back to an empty secret. A resolved file or object payload has
-exactly one trailing newline stripped; the value is otherwise verbatim.
+each `secret_refs.<name>` by its scheme — `env:`, `file:`, `sidecar:` or
+`s3://` — and rejects a value with any other scheme or none (see
+[ADR 0008](../adr/0008-connector-code-runs-only-in-an-isolated-worker.md)).
+The `s3://` scheme lazily imports `boto3`, needs the `[s3]` extra, and
+honours `AWS_ENDPOINT_URL_S3` / `AWS_REGION` for an S3-compatible store. A
+resolved file or object payload has exactly one trailing newline stripped;
+the value is otherwise verbatim.
 
 ## See Also
 
