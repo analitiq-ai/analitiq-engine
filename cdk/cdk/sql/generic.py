@@ -773,7 +773,7 @@ class GenericSQLConnector(BaseDestinationHandler):
     def retry_semantics(self, stream_id: str) -> RetryVerdict:
         """Retry-safety verdict per write mode and keys (#286).
 
-        Transport-independent under stage-then-merge (ADR
+        Transport-independent under stage-then-merge (spec
         sql-write-path §9): upsert merges on its conflict keys; insert
         anti-joins on row identity (contract primary key, or the
         synthetic ``_record_hash`` for a keyless stream) from the stage
@@ -2458,7 +2458,9 @@ class GenericSQLConnector(BaseDestinationHandler):
     # Discoverable + TableCreator roles (control-plane)
     # ==================================================================
     #
-    # Thin delegators to the standalone ``cdk.sql`` helpers (ADR §6). They
+    # Thin delegators to the standalone ``cdk.sql`` helpers (see
+    # ``docs/architecture/connector-module-architecture.md``,
+    # "The registry, discovery, and control-plane operations"). They
     # take a materialized ``ConnectionRuntime`` directly and run no gRPC
     # server or engine orchestration — the control-plane calls them.
 

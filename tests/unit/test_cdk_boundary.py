@@ -1,6 +1,7 @@
-"""Import-audit gate (ADR §4.1): the CDK must not depend on anything engine-side.
+"""Import-audit gate: the CDK must not depend on anything engine-side.
 
-The one rule: the dependency points **engine -> CDK, never back**. This test
+The one rule (see ``docs/architecture/connector-module-architecture.md``,
+"The boundary"): the dependency points **engine -> CDK, never back**. This test
 statically parses every module under the ``cdk`` package and fails if any of them
 imports an engine package (``src.*``) or the gRPC / protobuf stack (the CDK is
 transport-neutral — explicitly not ``grpcio`` / ``protobuf``). It is the "one
@@ -68,8 +69,9 @@ def test_cdk_imports_nothing_engine_side_or_grpc():
 
     assert not violations, (
         "CDK modules must not import engine-side (src.*) or gRPC/protobuf "
-        "packages (ADR §4.1 — the dependency points engine -> CDK, never "
-        "back):\n  " + "\n  ".join(violations)
+        "packages (the dependency points engine -> CDK, never back; see "
+        "docs/architecture/connector-module-architecture.md, "
+        '"The boundary"):\n  ' + "\n  ".join(violations)
     )
 
 

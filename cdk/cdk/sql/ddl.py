@@ -1,4 +1,6 @@
-"""Standalone ``create_table`` — the ``TableCreator`` contract (ADR §6).
+"""Standalone ``create_table`` — the ``TableCreator`` contract (see
+``docs/architecture/connector-module-architecture.md``,
+"The registry, discovery, and control-plane operations").
 
 Builds and runs ``CREATE TABLE`` DDL from a list of ``ColumnDef`` (each
 carrying an ``arrow_type``) using the connection-scoped **write** type-map

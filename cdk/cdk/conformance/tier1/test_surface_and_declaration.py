@@ -17,7 +17,7 @@ from cdk.conformance.violations import violation_report
 def test_override_surface_is_sanctioned(
     conformance_target: ConformanceTarget,
 ) -> None:
-    """Only the sanctioned dialect hooks are overridden (ADR s.10)."""
+    """Only the sanctioned connector and dialect members are overridden (sql-write-path s.10)."""
     violations = check_override_surface(conformance_target)
     if violations:
         pytest.fail(violation_report(violations))

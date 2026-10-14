@@ -109,7 +109,7 @@ class TestMatrixBoundToFunctions:
 
 
 class TestNamedCells:
-    """The conversions the ticket / ADR call out by name."""
+    """Individual cells pinned to their mode, function and runtime check."""
 
     @pytest.mark.parametrize(
         ("source", "target", "mode", "fn", "runtime_checked"),

@@ -1,10 +1,9 @@
-"""The write primitive end-to-end against the connector's real system.
+"""The write primitive end-to-end against the connector's real system
+(the live tier of sql-write-path section 10).
 
-All write modes, replay, and restart, exactly as the ADR's live tier
-specifies (sql-write-path section 10): every phase runs a fresh
-connector instance over a fresh connection, so a passing test also
-certifies restart behaviour; a replayed batch must observably match the
-connector's declared retry semantics.
+Each write and read phase runs a fresh connector instance over a fresh
+connection; a replayed insert or upsert batch must leave the target
+unchanged.
 
 Tests run their async phases through ``asyncio.run`` so the suite needs
 no pytest asyncio configuration in the consuming repo.
@@ -171,16 +170,15 @@ def test_upsert_without_conflict_keys_is_rejected_fatally(
 def test_declared_bulk_and_executemany_land_identically(
     harness: LiveHarness,
 ) -> None:
-    """Landing is a pure speed slot: bulk and executemany agree (ADR s.2).
+    """Landing is a pure speed slot: bulk and executemany agree (sql-write-path s.2).
 
     The batch is written twice — once through the declared bulk
     mechanism, once through a probe whose declaration is doctored to an
     empty bulk_load mapping so every backend (adbc_ingest included)
     lands via executemany — into two tables, and the resulting contents
-    must be identical. This is the live form of the
-    ADR's landing-equivalence assertion; native bulk protocols cannot
-    execute against generic fakes, so the contract tier certifies the
-    declaration/hook pairing and this scenario certifies the semantics.
+    must be identical. Native bulk protocols cannot execute against
+    generic fakes, so the contract tier certifies the declaration/hook
+    pairing and this scenario certifies the semantics.
     """
     caps = harness.target.declared_capabilities
     if caps is None or not caps.bulk_load:

@@ -2,10 +2,12 @@
 
 These replace the gRPC generated messages (``AckStatus`` / ``Cursor`` /
 ``SchemaMessage``) in the read/write contracts so the CDK stays
-transport-neutral: it must not import ``src/grpc`` (ADR §4.1). The engine's
-gRPC server (``src/destination/server.py``) translates protobuf <-> these
-types at the wire boundary. The ``AckStatus`` integer values are aligned 1:1
-with ``proto/analitiq/v1/stream.proto`` so that translation is mostly identity.
+transport-neutral: it must not import ``src/grpc`` (see
+``docs/architecture/connector-module-architecture.md``, "The boundary").
+The engine's gRPC server (``src/destination/server.py``) translates
+protobuf <-> these types at the wire boundary. The ``AckStatus`` integer
+values are aligned 1:1 with ``proto/analitiq/v1/stream.proto`` so that
+translation is mostly identity.
 Being IntEnums, members compare equal across enums when their values match
 (``AckStatus.ACK_STATUS_SUCCESS == WriteMode.WRITE_MODE_INSERT``) — an
 accepted trade-off of the proto alignment; never compare members of

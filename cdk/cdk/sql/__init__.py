@@ -2,8 +2,9 @@
 
 Vendor-neutral building blocks for the ``Discoverable`` / ``TableCreator``
 contracts (``cdk.contract``), driven directly by the control-plane (no gRPC
-server, no engine orchestration). The generic SQL base (ADR §8) will implement
-those Protocol methods by delegating to these functions.
+server, no engine orchestration). ``GenericSQLConnector`` implements those
+Protocol methods by delegating to these functions
+(``docs/architecture/connector-module-architecture.md``, "The contract").
 
 Public surface:
 
