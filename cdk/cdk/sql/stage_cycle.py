@@ -1,12 +1,13 @@
 """The stage-then-merge cycle, owned once above both SQL transports.
 
-Every SQL write is stage-then-merge (spec sql-write-path section 2): land
-the batch in a stage table, then run exactly one mode statement from stage
-to target. :class:`StageCycle` owns that step order and everything hanging
-off it — the pre-flight drop, the bulk-land dispatch with its fallback,
-land verification, the drop after success or failure, the poisoning rule,
-and the honest orphan log — so no transport carries a second copy to
-drift from. A transport supplies mechanisms, never rules.
+Every SQL write of a batch that carries rows is stage-then-merge (spec
+sql-write-path section 2): land the batch in a stage table, then run exactly
+one mode statement from stage to target. :class:`StageCycle` owns that step
+order and everything hanging off it — the pre-flight drop, the bulk-land
+dispatch with its fallback, land verification, the drop after success or
+failure, the poisoning rule, and the honest orphan log — so no transport
+carries a second copy to drift from. A transport supplies mechanisms, never
+rules.
 
 The cycle is the **sync body only**. It is handed a :class:`StageConnection`
 by a transport backend that has already put itself on a worker thread (or

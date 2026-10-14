@@ -734,8 +734,9 @@ class GenericSQLConnector(BaseDestinationHandler):
     def supports_insert(self) -> bool:
         """True when this connector can run the insert stage cycle now.
 
-        Every write on every transport is a stage cycle, so the stage
-        predicate gates the advertisement that gates the handshake.
+        Every write of a batch that carries rows is a stage cycle, on
+        every transport, so the stage predicate gates the advertisement
+        that gates the handshake.
         """
         return self._stage_ready()
 
@@ -1148,9 +1149,10 @@ class GenericSQLConnector(BaseDestinationHandler):
             # Mode-specific gate first: its refusal names the upsert fact
             # (merge_form), the more actionable message for the stream.
             self._check_upsert_capabilities(stream_id, address)
-        # Every write on every transport lands in a stage table first, so
-        # the declared stage shape and the dialect's stage DDL hook are
-        # handshake requirements for every write mode, not just upsert.
+        # Every write of a batch that carries rows lands in a stage table
+        # first, on every transport, so the declared stage shape and the
+        # dialect's stage DDL hook are handshake requirements for every
+        # write mode, not just upsert.
         self._check_stage_capabilities(stream_id, address)
 
         # Resolve the type-mapper for this stream's endpoint once —

@@ -31,8 +31,9 @@ closes off.
 
 Three properties follow, and the rest of this document is their consequence:
 
-- **One primitive.** Every SQL write on every transport is stage-then-merge
-  (§2), so no rule has a transport-specific copy to drift from.
+- **One primitive.** Every SQL write of a batch that carries rows, on every
+  transport, is stage-then-merge (§2), so no rule has a transport-specific
+  copy to drift from.
 - **A sanctioned thick-connector surface.** A system with a native bulk
   protocol reaches it through the declared `bulk_land` hook (§4), never by
   overriding CDK internals. Contract-less coupling to private methods breaks
@@ -48,9 +49,11 @@ small load job per source batch walks into per-table load-job quotas.
 
 ## 2. The write primitive
 
-**Every SQL write is stage-then-merge: land the batch in a stage table, then
-run exactly one mode statement from stage to target.** Both backends, all
-three modes, every dialect.
+**Every SQL write of a batch that carries rows is stage-then-merge: land the
+batch in a stage table, then run exactly one mode statement from stage to
+target.** Both backends, all three modes, every dialect. The one write outside
+the cycle is a `truncate_insert` refresh whose first batch carries no rows
+(below).
 
 Per mode, the single statement from stage to target is:
 
@@ -73,7 +76,11 @@ Per mode, the single statement from stage to target is:
   (BigQuery requires a `WHERE` clause) — and never the `TRUNCATE` statement,
   which implicitly commits on Redshift and others and would break the §7
   single-transaction promise. No identity dedup: deduping a full refresh would
-  collapse legitimate duplicate rows.
+  collapse legitimate duplicate rows. A first batch with no rows — including
+  the synthetic empty `batch_seq` 1 the engine sends after a read that yields
+  no batches — has nothing to land: `GenericSQLConnector` runs
+  `empty_table_sql` on its own through the backend's `run_ddl`, with no stage
+  table.
 
 ### Intra-batch duplicate rules
 

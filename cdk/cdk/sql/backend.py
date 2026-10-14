@@ -1,7 +1,8 @@
 """The transport seam of the stage-then-merge write primitive.
 
-Every SQL write is stage-then-merge (spec sql-write-path): land the batch
-in a stage table, then run exactly one mode statement from stage to target.
+Every SQL write of a batch that carries rows is stage-then-merge (spec
+sql-write-path): land the batch in a stage table, then run exactly one mode
+statement from stage to target.
 The facade (``GenericSQLConnector``) owns the semantics — write modes,
 identity and duplicate rules, refusals, retry verdicts, timeouts — and
 expresses one batch write as a :class:`StageWritePlan`. A

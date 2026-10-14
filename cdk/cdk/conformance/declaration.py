@@ -158,9 +158,10 @@ def check_declaration_consistency(target: ConformanceTarget) -> list[Violation]:
             Violation(
                 CHECK,
                 f"{dialect_cls.__name__} does not implement stage_table_sql; "
-                f"every SQL write lands in a stage table first, so a "
-                f"write-capable connector without stage DDL cannot write at "
-                f"all (spec sql-write-path section 2).",
+                f"every SQL write of a batch that carries rows lands in a "
+                f"stage table first, so a write-capable connector without "
+                f"stage DDL cannot write rows at all "
+                f"(spec sql-write-path section 2).",
             )
         )
 

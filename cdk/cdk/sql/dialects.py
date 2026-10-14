@@ -367,16 +367,16 @@ class SqlDialect:
     ) -> str:
         """``CREATE [TEMPORARY] TABLE`` *stage* shaped like *target*.
 
-        Every SQL write lands in a stage table first; this renders the
-        stage's DDL. ``temp`` comes from the connector's declared
-        ``sql_capabilities.stage.scope`` — ``True`` means a session-scoped
-        temporary table (a temp-scope *stage* carries no schema: it lives
-        in the session's namespace), ``False`` an ordinary table placed by
-        the declared schema rule. Column-copy syntax is vendor-specific
-        (postgres ``(LIKE target INCLUDING DEFAULTS)``, MySQL
-        ``LIKE target``); the connector package's dialect implements it.
-        The base raises so a declared stage shape a dialect cannot render
-        fails loudly instead of guessing DDL the system may misread.
+        Every SQL write of a batch that carries rows lands in a stage table
+        first; this renders the stage's DDL. ``temp`` comes from the
+        connector's declared ``sql_capabilities.stage.scope`` — ``True`` means
+        a session-scoped temporary table (a temp-scope *stage* carries no
+        schema: it lives in the session's namespace), ``False`` an ordinary
+        table placed by the declared schema rule. Column-copy syntax is
+        vendor-specific (postgres ``(LIKE target INCLUDING DEFAULTS)``, MySQL
+        ``LIKE target``); the connector package's dialect implements it. The
+        base raises, so a dialect that does not override this fails loudly
+        instead of guessing DDL the system may misread.
         """
         raise UnsupportedDialectOperationError("stage_table_sql", dialect=self.name)
 

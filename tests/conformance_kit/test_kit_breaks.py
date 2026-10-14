@@ -1101,9 +1101,10 @@ class TestDeclarationBreaks:
     def test_missing_stage_rendering_fails(
         self, reference_target: ConformanceTarget
     ) -> None:
-        """A write-capable connector without stage DDL cannot write at all.
+        """The kit reports a write-capable connector without stage DDL.
 
-        The thin generic class carries the base dialect, which renders no
+        Without it, no batch that carries rows can be written. The thin
+        generic class carries the base dialect, which renders no
         stage table; the skip gates in the rendering tests rely on this
         branch reporting the defect.
         """

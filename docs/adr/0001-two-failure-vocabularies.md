@@ -27,6 +27,12 @@ affects:
     pattern: "src/worker/readable.py"
   - type: path
     pattern: "cdk/cdk/declarations.py"
+  - type: path
+    pattern: "src/engine/stream_processor.py"
+  - type: path
+    pattern: "src/runner.py"
+  - type: path
+    pattern: "src/config/utils.py"
 assertions: []
 provenance:
   authoredBy: human

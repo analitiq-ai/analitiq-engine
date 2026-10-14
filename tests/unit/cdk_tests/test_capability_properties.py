@@ -36,7 +36,8 @@ class TestCapabilityProperties:
         self, adbc_only
     ):
         # Advertised modes must match what the schema handshake accepts:
-        # every write on every transport runs the stage cycle (issues
+        # every write of a batch that carries rows runs the stage cycle,
+        # on every transport (issues
         # #388/#389), so a connector without declared capabilities and a
         # stage-rendering dialect advertises neither INSERT nor
         # TRUNCATE_INSERT — identically on both transports.

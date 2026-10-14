@@ -23,6 +23,8 @@ affects:
     pattern: "cdk/cdk/api/read_setup.py"
   - type: path
     pattern: "cdk/cdk/api/dialects.py"
+  - type: path
+    pattern: "cdk/cdk/api/generic.py"
 assertions: []
 provenance:
   authoredBy: human
