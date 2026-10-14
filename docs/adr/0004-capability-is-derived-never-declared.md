@@ -3,7 +3,7 @@ schemaVersion: 0.2.0
 id: "0004"
 title: "Capability is derived, never declared"
 status: accepted
-date: 2026-09-08
+date: 2026-06-04
 deciders: ["@Analitiq-Bot-Wonka"]
 tags: [cdk, capabilities]
 scope: domain
