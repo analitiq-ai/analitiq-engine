@@ -67,7 +67,7 @@ Principle VI).
 - [ ] T008 [US1] Add root `package.json` (private, no scripts) with devDependency `@adrkit/cli` pinned exactly to the version the `mbeacom/adrkit` Action release bundles, plus `package-lock.json`; add `!/package.json` and `!/package-lock.json` re-includes to `.gitignore` (global `*.json` rule); run `npm ci` and confirm `./node_modules/.bin/adr --version` matches; document `npm ci` under `CONTRIBUTING.md` "Setup" — the adrkit extension resolves `./node_modules/.bin/adr` with no env var
 - [ ] T009 [US1] Run `./node_modules/.bin/adr migrate --from madr --dir docs/adr` on `docs/adr/0001-*.md` … `docs/adr/0006-*.md`
 - [ ] T010 [P] [US1] In each of `docs/adr/0001-*.md` … `0006-*.md` set `date` to the commit that introduced the rule (`git log --reverse -S '<rule phrase>' --format=%ad --date=short` over code and docs; not the file-add date, since 0003–0006 were added together by a docs move), `status: accepted`, `deciders: ["@Analitiq-Bot-Wonka"]` (FR-012: approving PR 3 is the ratification of these six)
-- [ ] T011 [P] [US1] Write `affects` for each of the six records per data-model.md's governed-paths rule (e.g. 0005 → `cdk/cdk/sql/stage_cycle.py`, `cdk/cdk/sql/*backend.py`, `cdk/cdk/sql/generic.py`; 0002 → the API page loop module) and confirm each with `adr explain <path>`
+- [ ] T011 [P] [US1] Write `affects` for each of the six records per data-model.md's governed-paths rule
 - [ ] T012 [US1] Correct `docs/adr/0006-batch-coalescing-is-engine-side.md` and `docs/data-path/sql-write-path.md` §8: a fatally rejected coalesced unit fails the stream whatever the strategy (DLQ writes the unit out), while a unit that exhausts its retries is DLQ'd or skipped, matching `BatchPolicy.run` in `src/engine/batch_policy.py`
 - [ ] T013 [US1] Scope `docs/adr/0002-one-stop-rule-for-every-paging-scheme.md` explicitly to the API read path (SQL read paths stop on a short page)
 - [ ] T014 [US1] Run `./node_modules/.bin/adr lint --dir docs/adr`: exit 0, zero errors; open PR 3
@@ -89,7 +89,7 @@ Principle VI).
 
 **Independent Test**: quickstart.md scenario 4 after each PR.
 
-Each doc PR: write its records (data-model.md "Record catalog"), delete the rule text, fold the
+Each doc PR: write its records (data-model.md "Record catalog"; `affects` per its governed-paths rule), delete the rule text, fold the
 descriptive remainder into `docs/architecture/engine-architecture.md` or delete it, repoint
 citations, update the constitution Source lines that cite the doc (Complexity Tracking), delete the
 doc when empty. A rule already recorded by an earlier PR is only deleted, not re-recorded.
