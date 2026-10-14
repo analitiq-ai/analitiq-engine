@@ -17,17 +17,16 @@ One file `docs/adr/NNNN-slug.md`, flat. Frontmatter schema is owned by adrkit
 | `relatesTo` | records it depends on or refines |
 | `provenance` | `authoredBy: agent` plus `ratifiedBy` for agent-drafted records |
 
-**Governed-paths rule.** `affects` names the files where the record's rule is defined or
-enforced, and the tests and conformance checks that assert it. A file that only carries, forwards,
-aggregates or passes through a value the rule produces is left out, and so is a sender that uses
-the vocabulary without applying the rule. A glob is used only when every file it matches meets
-this rule. The PR that writes the record derives the list, in three steps:
+**Governed-paths rule.** A path belongs in `affects` only if the record's rule is defined or
+enforced there, or a test or conformance check there asserts the rule. A file that only carries,
+forwards, aggregates or passes through a value the rule produces does not belong, and neither does
+a sender that uses the vocabulary without applying the rule. A glob is used only when every file
+it matches belongs. The PR that writes the record looks for candidates in three places, keeps each
+one only if it belongs, and confirms each kept path with `adr explain <path>`:
 
 1. the module that defines the rule's types or entry points;
-2. every call site of those entry points, found with `git grep`;
-3. every test or conformance check that asserts the rule.
-
-Each path is confirmed with `adr explain <path>`.
+2. the `git grep` hits on those entry points;
+3. the tests and conformance checks that exercise the rule.
 
 Body sections: Context, Decision, Options considered, Trade-offs, Consequences (including how we
 would know it was wrong). No issue numbers, no `file.py:123` coordinates.
