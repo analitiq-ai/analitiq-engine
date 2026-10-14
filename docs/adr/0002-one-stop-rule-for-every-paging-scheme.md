@@ -1,3 +1,22 @@
+---
+schemaVersion: 0.2.0
+id: "0002"
+title: "One stop rule for every paging scheme"
+status: accepted
+date: 2026-08-01
+deciders: ["@Analitiq-Bot-Wonka"]
+tags: [api, paging]
+scope: component
+reversibility: one-way-door
+blastRadius: component
+relatesTo: []
+affects:
+  - type: path
+    pattern: "cdk/cdk/api/**"
+provenance:
+  authoredBy: human
+---
+
 # ADR 0002: One stop rule for every paging scheme
 
 One loop walks every paging scheme the contract declares.

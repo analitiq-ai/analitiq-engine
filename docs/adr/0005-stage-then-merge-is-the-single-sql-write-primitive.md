@@ -1,3 +1,22 @@
+---
+schemaVersion: 0.2.0
+id: "0005"
+title: "Stage-then-merge is the single SQL write primitive"
+status: accepted
+date: 2026-07-24
+deciders: ["@Analitiq-Bot-Wonka"]
+tags: [sql, write-path]
+scope: domain
+reversibility: one-way-door
+blastRadius: team
+relatesTo: ["0006"]
+affects:
+  - type: path
+    pattern: "cdk/cdk/sql/**"
+provenance:
+  authoredBy: human
+---
+
 # ADR 0005: Stage-then-merge is the single SQL write primitive
 
 Every SQL write, on every transport, every dialect, every write mode,

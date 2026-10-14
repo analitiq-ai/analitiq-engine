@@ -1,3 +1,22 @@
+---
+schemaVersion: 0.2.0
+id: "0006"
+title: "Batch coalescing lives in the engine, not the destination"
+status: accepted
+date: 2026-07-24
+deciders: ["@Analitiq-Bot-Wonka"]
+tags: [coalescing, wire-protocol]
+scope: domain
+reversibility: two-way-door
+blastRadius: team
+relatesTo: ["0005"]
+affects:
+  - type: path
+    pattern: "src/engine/**"
+provenance:
+  authoredBy: human
+---
+
 # ADR 0006: Batch coalescing lives in the engine, not the destination
 
 The wire protocol is strictly one batch, one ack, one cursor persist: a

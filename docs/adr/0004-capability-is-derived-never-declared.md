@@ -1,3 +1,24 @@
+---
+schemaVersion: 0.2.0
+id: "0004"
+title: "Capability is derived, never declared"
+status: accepted
+date: 2026-06-01
+deciders: ["@Analitiq-Bot-Wonka"]
+tags: [cdk, capabilities]
+scope: domain
+reversibility: one-way-door
+blastRadius: team
+relatesTo: ["0003"]
+affects:
+  - type: path
+    pattern: "cdk/cdk/registry.py"
+  - type: path
+    pattern: "cdk/cdk/contract.py"
+provenance:
+  authoredBy: human
+---
+
 # ADR 0004: Capability is derived, never declared
 
 Whether a connector can discover schemas, create tables, read, or write is
