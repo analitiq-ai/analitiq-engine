@@ -57,7 +57,7 @@ Changing the matrix's content requires a version bump: the publisher refuses to 
 
 ## Consequences
 
-- Easier: a new family reaches the parser, the policy and every consumer from one edit; an integer-parameterized or structural family also needs a probe exemplar, and the conformance kit refuses to run until it has one.
+- Easier: a new family of an existing conversion kind reaches the parser and the conversion policy from its one `ARROW_FAMILIES` entry.
 - Harder: changing the policy is a cross-repo release, not a local fix.
 - Known exception: `SchemaContract.from_pylist`, which builds the API and SQLAlchemy source reads from Python values, is outside the matrix. It parses ISO strings into temporal columns, which the matrix forbids as a cast, and a declared `source_format` path can end in `pc.cast(safe=False)`.
 - Known exception: only SQL connectors run `SchemaContract.cast_arrow_batch`, on the destination write and the ADBC source read. API, file and stdout destinations write the batch's values without casting them to the endpoint schema, so no matrix check runs there.
