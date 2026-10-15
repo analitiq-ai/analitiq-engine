@@ -36,7 +36,7 @@ We declare every Arrow family once, in the CDK's `ARROW_FAMILIES` table, with it
 ## Options considered
 
 ### Option A: The engine's CDK table is the single vocabulary; everything else is generated (chosen)
-- Pro: adding a family is one edit; the two boundaries and the frontend agree by construction.
+- Pro: the parser, the conversion policy and the published artifacts derive from one table, so the transform retype, the destination cast and the frontend read one conversion matrix.
 - Con: the engine repo becomes a publisher, with an npm package and versioned artifacts to maintain.
 
 ### Option B: The plugins contract owns the vocabulary and the engine mirrors it
@@ -57,7 +57,7 @@ Changing the matrix's content requires a version bump: the publisher refuses to 
 
 ## Consequences
 
-- Easier: a new family of an existing conversion kind reaches the parser and the conversion policy from its one `ARROW_FAMILIES` entry.
+- Easier: a new family of an existing conversion kind other than `nested` reaches the parser and the conversion policy from its one `ARROW_FAMILIES` entry.
 - Harder: changing the policy is a cross-repo release, not a local fix.
 - Known exception: `SchemaContract.from_pylist`, which builds the API and SQLAlchemy source reads from Python values, is outside the matrix. It parses ISO strings into temporal columns, which the matrix forbids as a cast, and a declared `source_format` path can end in `pc.cast(safe=False)`.
 - Known exception: only SQL connectors run `SchemaContract.cast_arrow_batch`, on the destination write and the ADBC source read. API, file and stdout destinations write the batch's values without casting them to the endpoint schema, so no matrix check runs there.
