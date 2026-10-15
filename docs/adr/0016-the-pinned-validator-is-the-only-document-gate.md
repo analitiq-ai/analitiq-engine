@@ -33,7 +33,7 @@ Pipeline, stream, connection, connector, endpoint and type-map documents are aut
 
 ## Decision
 
-We refuse every run unless the pinned `analitiq-validator` passes the run's workspace request: `read_run_workspace` collects the manifest and the packages of the pipeline, the connections it names and their connectors, and `gate_run` calls `validate_workspace` on that one request and raises `WorkspaceRejectedError` on a failed verdict. Config loading builds the engine's typed `analitiq.contracts` models from the texts that verdict graded. The mapping compiler checks at import that its expression compilers and function kernels match the contract's expression forms and function names exactly, so a contract release that adds or removes one fails engine startup.
+We refuse every run unless the pinned `analitiq-validator` passes the run's workspace request: `read_run_workspace` collects the manifest and the packages of the pipeline, the connections it names and their connectors, and `gate_run` calls `validate_workspace` on that one request and raises `WorkspaceRejectedError` on a failed verdict. Config loading builds the engine's typed `analitiq.contracts` models from the texts that verdict graded. The census, `tools/contract_consumption.py`, uses mypy's type map to list the contract model fields that `cdk` and `src` read as typed attributes, and CI fails when its manifest is stale. The mapping compiler checks at import that its expression compilers and function kernels match the contract's expression forms and function names exactly, so a contract release that adds or removes one fails engine startup.
 
 ## Options considered
 

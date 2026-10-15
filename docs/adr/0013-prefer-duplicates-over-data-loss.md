@@ -58,7 +58,7 @@ Every destination must tolerate re-delivery. Sinks without content identity (see
 
 Known exceptions in code:
 
-- Under the `dlq` or `skip` error strategy, a batch whose retries run out, including retries of a send that reached no ack, is dropped and the stream goes on; the next committed batch's cursor then moves the checkpoint past it. `dlq` writes the rows to the dead-letter queue, and a row whose write fails is logged as lost; `skip` keeps nothing. The exception is a `truncate_insert` stream's first batch, whose failure fails the stream.
+- Under the `dlq` or `skip` error strategy, a batch whose retries run out, including retries of a send that reached no ack, is dropped and the stream goes on; the next committed batch's cursor then moves the checkpoint past it. `dlq` writes the rows to the dead-letter queue (see [ADR 0011](0011-a-batch-is-accepted-or-rejected-whole.md) for a row it cannot write); `skip` writes them nowhere. The exception is a `truncate_insert` stream's first batch, whose failure fails the stream.
 - An incremental SQL read pages with `LIMIT`/`OFFSET`, ordered by the cursor column alone. Rows tied on the cursor value across a page boundary can be skipped, and later pages then move the checkpoint past them.
 - An incremental API read's lower bound derives from the committed cursor and `safety_window_seconds`. A row below that bound in a batch that never committed (the provider returned rows out of cursor order) is not read again; with a window of 0 and an exclusive `gt` lower bound on a `date-time` or id cursor, neither is a row that later arrives at the cursor value.
 

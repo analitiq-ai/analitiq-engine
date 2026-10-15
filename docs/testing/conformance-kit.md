@@ -137,7 +137,8 @@ live-tier only.
 Which systems run tier 1 only, and why `kind: api` has no live tier, is
 recorded in
 [ADR 0021](../adr/0021-connectors-are-certified-by-the-cdk-conformance-kit-in-their-own-ci.md).
-Kind `api` is
+An api connector's tier-2 run skips, naming that reason, and the
+applicability gate below does not fire for it. Kind `api` is
 assessed at tier 1, where the read path is executed.
 
 ## What it cannot assess, it does not pass
@@ -149,7 +150,8 @@ as *passed*. That is the one outcome a required status check must never
 produce, and the fix belongs in the kit rather than in a kind branch in
 every connector repo's CI.
 
-So a run that collects no check for its target's kind fails, naming it:
+So a run that collects no check for its target's kind fails, naming it
+(an api tier-2 run skips before the gate, as above):
 
 ```
 [kind-applicability] no check in this run applies to connector kind
