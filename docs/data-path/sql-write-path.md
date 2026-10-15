@@ -10,9 +10,9 @@ CI. Section 8 is the exception — engine-side coalescing and the `write_unit`
 declaration it consumes are specified here but not built: the engine does not
 coalesce, and a `write_unit` declaration has no consumer.
 The read path, discovery, the mapping layer, and the gRPC ack protocol are
-unchanged except where this document names them.
+outside this document except where it names them.
 
-Related docs: transport strategy rationale in
+Related docs: transport strategy in
 [arrow-and-transport-strategy.md](arrow-and-transport-strategy.md), wire protocol in
 [grpc-streaming-architecture.md](../architecture/grpc-streaming-architecture.md), CDK packaging
 and the connector contract in
@@ -23,48 +23,25 @@ and [ADR 0006](../adr/0006-batch-coalescing-is-engine-side.md).
 
 ## 1. What this prevents
 
-The failure mode this design exists to prevent is **the same author intent
-taking a different primitive per transport**. See
-[ADR 0005](../adr/0005-stage-then-merge-is-the-single-sql-write-primitive.md)
-for why that failure mode, and no other design, is what stage-then-merge
-closes off.
-
-Three properties follow, and the rest of this document is their consequence:
-
-- **One primitive.** Every SQL write on every transport is stage-then-merge
-  (§2), so no rule has a transport-specific copy to drift from.
-- **A sanctioned thick-connector surface.** A system with a native bulk
-  protocol reaches it through the declared `bulk_land` hook (§4), never by
-  overriding CDK internals. Contract-less coupling to private methods breaks
-  silently on any refactor, which is why the conformance kit fails it (§10).
-- **Declared facts, not guesses.** What a system can do is declared data
-  (§5); how to render it is a small dialect class. A
-  needed-but-undeclared capability refuses loudly instead of defaulting.
-
-Engine-side coalescing (§8) exists for a narrower reason: the wire protocol is
-strictly one batch → one ack → cursor persisted, so a destination can never
-hold more than one unacked batch and has nothing to coalesce on its own. One
-small load job per source batch walks into per-table load-job quotas.
+Stage-then-merge as the single SQL write primitive: [ADR 0005](../adr/0005-stage-then-merge-is-the-single-sql-write-primitive.md). Engine-side
+coalescing: [ADR 0006](../adr/0006-batch-coalescing-is-engine-side.md).
 
 ## 2. The write primitive
 
-**Every SQL write is stage-then-merge: land the batch in a stage table, then
-run exactly one mode statement from stage to target.** Both backends, all
-three modes, every dialect.
+A write lands the batch in a stage table, then runs one mode statement from
+stage to target ([ADR 0005](../adr/0005-stage-then-merge-is-the-single-sql-write-primitive.md)).
 
 Per mode, the single statement from stage to target is:
 
 - **`upsert`** — the dialect's declared merge form on the stream's
   `conflict_keys`: `MERGE INTO`, `INSERT … ON CONFLICT DO UPDATE`, or
-  `INSERT … ON DUPLICATE KEY UPDATE` (§5). Empty `conflict_keys` refuses
-  loudly and never downgrades to insert.
+  `INSERT … ON DUPLICATE KEY UPDATE` (§5). Empty `conflict_keys` is refused
+  ([ADR 0005](../adr/0005-stage-then-merge-is-the-single-sql-write-primitive.md)).
 - **`insert`** — one set-based anti-join
-  `INSERT INTO target SELECT … FROM stage WHERE NOT EXISTS (…identity match…)`.
-  Identity is the contract primary key, or the synthetic `_record_hash` column
-  for a keyless stream. The statement is plain ANSI and runs on both backends,
-  which is what makes insert exactly-once wherever the system enforces the
-  identity constraint (§9) regardless of transport — there is no per-transport
-  insert mechanism and so no parity gap to maintain.
+  `INSERT INTO target SELECT … FROM stage WHERE NOT EXISTS (…identity match…)`,
+  plain ANSI on both backends. Identity is the contract primary key, or the
+  synthetic `_record_hash` column for a keyless stream ([ADR 0014](../adr/0014-writes-are-idempotent-on-content-derived-identity-never-batch-position.md)); its verdict
+  is in §9.
 - **`truncate_insert`** — empty the target once on the read's first batch
   (`batch_seq == 1`), then a plain
   `INSERT INTO target SELECT … FROM stage` append. The emptying statement is
@@ -77,18 +54,20 @@ Per mode, the single statement from stage to target is:
 
 ### Intra-batch duplicate rules
 
-The stage feeds set-based statements, so duplicate keys inside one batch must
-be resolved before the mode statement runs — a merge with two matching source
-rows fails on most systems, and an anti-join admits both copies. The rules,
-applied in Arrow space before landing:
+The stage feeds set-based statements, so each mode has a rule for duplicate
+keys inside one batch — an anti-join admits both copies, and a merge with two
+matching source rows fails on most systems. Any collapsing happens in Arrow
+space before landing:
 
 - **`insert`** — duplicate identities collapse to the **first** occurrence,
   applied where the identity column is attached to the batch.
-- **`upsert`** — duplicate `conflict_keys` inside one **source batch** are a
-  loud failure (`ON CONFLICT` raises "cannot affect row a second time";
-  `MERGE` raises "multiple source rows match"): a single source page
-  carrying the same key twice means the source's `conflict_keys` are not
-  actually unique, and no collapse rule can be correct. Coalescing (§8)
+- **`upsert`** — duplicate `conflict_keys` inside one **source batch** are
+  not collapsed: a single source page carrying the same key twice means the
+  source's `conflict_keys` are not actually unique, and no collapse rule can
+  be correct. What happens is the system's merge behaviour: `ON CONFLICT`
+  raises "cannot affect row a second time" and `MERGE` raises on multiple
+  matching source rows on most systems, while `INSERT … ON DUPLICATE KEY
+  UPDATE` does not raise. Coalescing as designed in §8
   never manufactures this case: duplicate keys *across* the source batches
   of one merged unit are collapsed by the engine's coalescer before the
   unit is built, keeping the later batch's row — byte-for-byte the row a
@@ -99,29 +78,27 @@ applied in Arrow space before landing:
 
 ### Landing
 
-Landing into the stage is **executemany `INSERT` by default, bulk-load by
-declaration**. A connector whose system has a native bulk protocol declares it
-(§5) and implements the `bulk_land` dialect hook (§4); the CDK then uses it.
-The hook is a pure speed slot: stage contents are identical either way, the
-downstream mode statement is the same statement, and a declined bulk land
-falls back to executemany with an INFO-level log (a speed downgrade is
-visible, never silent). `adbc_ingest` is not an ADBC-private code path but
+Landing into the stage is executemany `INSERT` by default. A connector whose
+system has its own bulk protocol, other than `adbc_ingest`, declares it
+(§5) and implements the `bulk_land` dialect hook (§4) ([ADR 0005](../adr/0005-stage-then-merge-is-the-single-sql-write-primitive.md)); the CDK then uses it. The downstream mode
+statement is the same either way. At run time the cycle checks only the
+stage's row count after connector bulk code ran. A declined bulk land falls back
+to executemany with an INFO-level log. `adbc_ingest` is
 that backend's declared bulk mechanism, and a system's own protocol —
 `LOAD DATA LOCAL INFILE`, `COPY`, a load-job API — lands here too.
 
-Stage-then-merge costs one extra object and one extra statement per batch
-on systems where direct DML alone would suffice (small Postgres
-pipelines). This is accepted cost: the batch sizes where it matters are
-exactly the ones coalescing (§8) grows, and a temp-scope stage (§6) is one
-in-session table.
+The accepted cost is a stage table, and the statements that create, land
+into and drop it, on non-empty batches where direct DML alone would do
+(small Postgres pipelines). The batches where
+it matters are the small ones coalescing (§8) is designed to grow, and a
+temp-scope stage (§6) is one in-session table.
 
 ## 3. Facade and backends
 
-`GenericSQLConnector` remains the single **semantic owner**: write modes,
-truncate gating, identity and duplicate rules, `conflict_keys` refusal,
-statement timeouts, retry verdicts, the exception → `AckStatus` /
-`FailureCategory` ladder, and readiness gates all stay in the facade,
-defined once. Transport mechanics move behind a backend interface:
+`GenericSQLConnector` owns write modes, truncate gating, identity and
+duplicate rules, `conflict_keys` refusal, statement timeouts, retry verdicts,
+the exception → `AckStatus` / `FailureCategory` ladder, and readiness gates
+([ADR 0005](../adr/0005-stage-then-merge-is-the-single-sql-write-primitive.md)). Transport mechanics sit behind a backend interface:
 
 ```python
 @dataclass(frozen=True)
@@ -173,8 +150,7 @@ class TransportBackend(ABC):
         count -- a backend rowcount never reaches the ack."""
 ```
 
-**The step order is not a backend's either.** `StageCycle` owns it once
-above both transports: the pre-flight drop, the stage creation, the
+`StageCycle` owns the step order ([ADR 0005](../adr/0005-stage-then-merge-is-the-single-sql-write-primitive.md)): the pre-flight drop, the stage creation, the
 bulk-land dispatch, the landing and its verification, the optional
 target-emptying statement, the mode statement, the drop after success or
 failure, the poisoning rule (§6) and the honest orphan log. It is a sync
@@ -226,20 +202,20 @@ for the mirror-image reason: SQLAlchemy reflects, ADBC reads the
 description of a zero-row probe — same intent, two mechanisms — and it is
 called after DDL, outside any write cycle.
 
-**A plan is complete for every dialect-specific write statement, and the
-backends render no SQL at all.** The generic statements around the write
-— the liveness probe, the stage row count, the zero-row column probe, the
-qmark landing `INSERT` — are plain ANSI whose only dialect-aware part is
-identifier quoting, so they are rendered once above the transport seam
-through the dialect and handed down; a backend executes what it is given.
+A plan carries every dialect-specific write statement ([ADR 0005](../adr/0005-stage-then-merge-is-the-single-sql-write-primitive.md)). The generic
+statements around the write — the stage row count, the zero-row column
+probe, the qmark landing `INSERT` — are plain ANSI whose only dialect-aware
+part is identifier quoting, so each is rendered through the dialect by one
+shared function in `cdk.sql.stage_cycle` that a transport calls, never by a
+per-transport copy. The liveness probe is the shared constant
+`LIVENESS_PROBE_SQL`.
 
 The facade prepares the batch once (type casting, `_record_hash` attachment,
 duplicate collapsing — all semantics) and hands the backend Arrow; each
 backend converts to its parameter shape internally (dict records for
 SQLAlchemy executemany, Arrow straight through for `adbc_ingest`). Registry
-resolution, the connector contract, and the handler surface
-(`BaseDestinationHandler`) are unchanged; connectors are unaffected by the
-split itself.
+resolution and the handler surface (`BaseDestinationHandler`) are outside
+the split.
 
 The split covers the destination write path only; the read path resolves its
 transport divergence through the QueryBuilder and is out of scope.
@@ -302,19 +278,15 @@ before the bare-name landing it protects — the only statement of the cycle
 that is not fully qualified, since every statement a plan carries is
 rendered with its address.
 `adbc_ingest_kwargs`, TLS connect-arg hooks, DDL/discovery hooks, and the
-identifier hooks are unchanged.
+identifier hooks are retained.
 
-**Not on the class surface:** capability *facts* are declared data (§5), never
-dialect methods. The dialect renders only; there are no `supports_*` booleans
-to mirror a declaration, and one `stage_table_sql` serves both backends.
+**Not on the class surface:** the `sql_capabilities` declaration of §5
+([ADR 0005](../adr/0005-stage-then-merge-is-the-single-sql-write-primitive.md)), which a dialect carries through the read-only
+`SqlDialect.capabilities`. One `stage_table_sql` serves both backends.
 
 ## 5. Declared capabilities in `connector.json`
 
-Guessed defaults are the mechanism of per-dialect divergence: base-class
-behavior right for one family and silently wrong for the next. SQL-shape
-capabilities are facts about the target system — not derivable from protocol
-conformance, unlike the operation capabilities the connector-module contract
-rightly refuses to declare — so they are declared as data.
+SQL-shape capabilities are declared as data ([ADR 0005](../adr/0005-stage-then-merge-is-the-single-sql-write-primitive.md)).
 
 `bulk_load` maps each SQL transport family to the mechanism its
 connections land with — the mechanism is a fact about a transport, not
@@ -326,34 +298,26 @@ via executemany; an empty object means no bulk anywhere.
 of its caught exception carry a native error code (or the reserved
 `"__exception_class__"` to match the exception's class name); `codes` maps
 whatever native value each attribute reads to an engine category, with no
-engine-enforced shape on the native code itself. A connector whose signal
-needs more than a flat attribute read (nested body inspection, a computed
-match) overrides `BaseDestinationHandler.classify_error()` instead —
-consulted only when the declarative lookup above finds nothing.
+engine-enforced shape on the native code itself. A signal that needs more
+than a flat attribute read goes in a `BaseDestinationHandler.classify_error()`
+override ([ADR 0022](../adr/0022-connectors-declare-driver-failures-as-facts.md)).
 
 Properties:
 
-- **Refuse, don't guess.** Every CDK consumer site treats a
-  needed-but-undeclared capability as a loud configuration error at config or
-  handshake time — a customer-safe `CONFIG_INVALID`-class message naming the
-  missing declaration. No base-class default ever fills in a guess. An upsert
+- **Refuse, don't guess** ([ADR 0005](../adr/0005-stage-then-merge-is-the-single-sql-write-primitive.md)): a needed-but-undeclared capability is
+  refused with an error naming the missing declaration
+  (`undeclared_capability_error`), never filled in with a guess. An upsert
   stream against `merge_form: "none"` refuses; a bare `bulk_land` override
   without a declared `bulk_load` mechanism is never called (and fails the
   conformance suite, §10).
-- **One source of truth per fact.** The JSON declares *whether* the system
-  has a shape; the dialect class renders *how* to write it.
 - `"load_job"` names the mechanism of systems whose bulk path is a load-job
   API driven through the system's own client rather than the transport
   connection (BigQuery). It lands into the per-batch stage table like every
-  other mechanism — which is what makes §8's quota shape hold.
-- **The block reaches the worker in the resolved payload.** The isolated
-  worker never reads `connector.json` — its bootstrap carries only resolved
-  values (`build_bootstrap` / `ConnectionRuntime.from_resolved_payload`).
-  The engine folds the capability block into that payload, the same
-  channel that delivers type maps and endpoint documents,
-  so the facade and backends consume declared capabilities from the runtime
-  in the process where writes execute — never a guessed default because the
-  definition file was out of reach.
+  other mechanism — which is what makes the quota shape in
+  [ADR 0006](../adr/0006-batch-coalescing-is-engine-side.md) hold.
+- **The block reaches the worker in the resolved payload** ([ADR 0008](../adr/0008-connector-code-runs-only-in-an-isolated-worker.md)), so the
+  dialect that carries the declared capabilities is built in the process
+  where writes execute.
 - **The declaration becomes a dialect once, at construction.**
   `SqlDialect.for_runtime(runtime)` is the only place a runtime's declared
   block is parsed and attached; the facade calls it on every entry that
@@ -373,33 +337,28 @@ Properties:
   A `connect()` that fails leaves the handler with no transport at all — it
   refuses every write until a later `connect()` completes, rather than
   serving the new declaration over the previous connection.
-- `write_unit` sits at the connector level because it is not a SQL fact —
-  any destination whose write cost is per-write-operation (file/S3 sinks
-  included) may declare it, and the engine consumes it transport-agnostically
-  (§8). Absent means "no preference": the engine does not coalesce.
+- `write_unit` sits at the connector level: any destination whose write cost
+  is per-write-operation (file/S3 sinks included) may declare it, for the
+  engine's coalescer (§8, [ADR 0006](../adr/0006-batch-coalescing-is-engine-side.md)). Absent means "no preference": the engine
+  does not coalesce.
 - **`error_map`, `limits` and `concurrency` are additive, not
   refuse-don't-guess.** A missing
   `merge_form` blocks an upsert; a missing limit or error mapping cannot
   block anything — absence means "no declared cap / no declared mapping". A
   runtime failure caused by an undeclared cap or mapping is a connector
   defect, never worked around in the engine.
-- **`error_map` declares facts, never verdicts.** The engine alone derives
-  `AckStatus`, `FailureCategory`, and `ErrorCode` from a declared category
-  (the per-context verdict
-  tables in `cdk.declarations`, the same trust rule as retry semantics,
-  §9). Matching happens at the failure's birth site against the immediate
-  exception (plus at most its single explicit driver link — SQLAlchemy's
-  `orig` or `raise ... from`); the verdict then crosses process
-  boundaries as structured signals (the worker's deterministic flag and
-  `declared_category` wire field, the ack's failure category) — never
-  re-derived downstream from chains or text. The heuristics are demoted
-  to last resort, per context: the read path resolves declared verdicts
+- **`error_map` resolution** ([ADR 0022](../adr/0022-connectors-declare-driver-failures-as-facts.md)). A connector's `error_map` declares
+  categories, never verdicts; fixed CDK and engine tables turn a category into a
+  verdict. The heuristics come after the
+  declarations, per context: the read path resolves declared verdicts
   (the birth-site category on the typed error, then the map, then
   `classify_error`) → sanctioned typed errors; the write ack ladder
   resolves its typed engine errors (type-map, dialect, TLS — engine
   contracts a driver map must not re-route) → declared map →
-  `classify_error` → class-name heuristic; the ADBC boundary and both HTTP
-  sites resolve declared map → `classify_error` → built-in heuristic.
+  `classify_error` → class-name heuristic; the ADBC write cycle resolves declared map → `classify_error` →
+  built-in heuristic; the HTTP sites resolve in `cdk.api.http.failure_facts`
+  and `cdk.api.verdicts`.
+  ADBC DDL and readiness probes apply the built-in heuristic alone.
   These are CDK-side, at the boundary that caught the driver error; the
   engine's own classification reads no exception type or text at all.
 - **`limits` consumption.** The executemany stage landing chunks rows by
@@ -516,21 +475,16 @@ connection acquisition and cancellation semantics only, never a forked
 cycle. The ADBC backend reaches the same body over its cached DBAPI
 connection.
 
-Statement-timeout policy stays in the facade (`GenericSQLConnector`), not the
-backends: one deadline covers the whole batch write, set per stream through
-`set_statement_timeout`, with the known limitation that only the async
-SQLAlchemy flavor can enforce it in-band.
+Statement-timeout policy is the facade's: one deadline covers the whole
+batch write. `set_statement_timeout`, called on each schema handshake, sets
+it for the handler; only the async SQLAlchemy flavor can enforce it in-band.
 
 ## 8. Batch coalescing
 
 This section specifies the design; the engine does not coalesce, and a
 declared `write_unit` has no consumer.
 
-**The engine coalesces source batches before sending; the wire protocol does
-not change** — the exactly-once unit "one sent batch = one ack = one
-cursor persist" stays byte-for-byte intact; the sent batch just gets
-bigger. See [ADR 0006](../adr/0006-batch-coalescing-is-engine-side.md)
-for why this happens in the engine rather than the destination.
+In this design the engine coalesces source batches before sending ([ADR 0006](../adr/0006-batch-coalescing-is-engine-side.md)).
 
 Mechanics:
 
@@ -565,8 +519,8 @@ Mechanics:
   stable across retries, which is what deterministic load-job-ID schemes
   built on it depend on.
 - No timer: pipeline runs are finite reads, so the tail flushes when the
-  read ends. Backpressure is unchanged — the coalescer holds at most one
-  unit.
+  read ends. Backpressure would stay bounded: the coalescer would hold at
+  most one unit.
 - `truncate_insert` is safe by construction: the merged first unit is sent
   as `batch_seq` 1, so truncate-once gating fires exactly once,
   covering every source page inside the unit. The zero-batch case is
@@ -574,13 +528,12 @@ Mechanics:
   coalescer to hold, and the engine's synthetic empty `batch_seq` 1 —
   which is what truncates the target after a clean zero-row read — is sent
   outside the coalescer's path.
-- **The dlq/skip unit is the sent batch — as it always was.** Declaring
-  `write_unit` consciously widens that unit: a fatally rejected coalesced
-  unit is DLQ'd or skipped wholesale, good rows included, exactly as an
-  uncoalesced source batch would be. Nothing is lost under `dlq`: every row of
-  the unit is persisted to the dead-letter queue as a source batch's rows are
-  (the per-record JSONL the DLQ writes), and recovery is the
-  same operator workflow either way — over more rows. A row the upsert
+- **Coalescing would widen the rejection unit.** A declared `write_unit`
+  would widen it from a source batch to a coalesced unit, handled whole,
+  good rows included, as an uncoalesced source batch is. Under `dlq` the
+  unit would go to the dead-letter queue as a source batch does (the
+  per-record JSONL the DLQ writes), and recovery would be the same operator
+  workflow — over more rows. A row the upsert
   collapse dropped is represented in that unit by its surviving later
   version — same `conflict_keys` identity, newer payload — so a
   dead-lettered unit still carries one row per identity, and replaying it
@@ -589,12 +542,10 @@ Mechanics:
   *intermediate* version an earlier batch would have briefly committed;
   that is part of the widened-unit cost, controlled the same way — by
   unit size. Unit size is the
-  operator's control over rejection granularity: a deployment that needs
-  finer DLQ isolation declares a smaller `write_unit`. The engine adds no split-and-retry machinery for this:
-  whole-batch rejection without per-record attribution is this engine's
-  recorded design stance (untrusted connectors cannot be trusted to blame
-  individual rows), and wholesale rejection of a load unit is the norm for
-  load-based warehouse pipelines.
+  operator's control over rejection granularity, down to one source batch
+  (the coalescer only merges batches, never splits one): a deployment that
+  needs finer DLQ isolation declares a smaller `write_unit`. There is no
+  split-and-retry ([ADR 0011](../adr/0011-a-batch-is-accepted-or-rejected-whole.md)).
 - **Server-registered idempotency tokens include content.** Stage *names*
   stay batch-derived (`run_id|stream_id|batch_seq`): a stale stage is
   dropped and rebuilt, so the name only has to be deterministic per
@@ -629,13 +580,8 @@ Mechanics:
   under one ack) would lift that ceiling and is explicitly out of scope —
   an additive protocol change to revisit only if a workload proves the
   single-message ceiling insufficient.
-- Quota shape, recorded so the ceiling is a decision and not an accident:
-  under stage-then-merge the target table receives `MERGE` **query** jobs (a
-  high-quota class), and each load job lands in its own per-batch stage
-  table — the per-table load-job quota never accumulates against any one
-  table. What unit count does bound are the project-level load-job quota and
-  the per-table/dataset operation-rate limits, all of which scale down
-  linearly with coalescing — which is exactly what `write_unit` buys.
+- The quota shape coalescing addresses is in
+  [ADR 0006](../adr/0006-batch-coalescing-is-engine-side.md).
 - The write-unit fact belongs in `connector.json` and nowhere else. The
   proto's `GetCapabilitiesResponse` also carries `max_batch_size`
   / `max_batch_bytes` sizing fields (`src/destination/server.py`,
@@ -646,8 +592,8 @@ Mechanics:
 
 ## 9. Idempotency and retry verdicts
 
-Row identity is content-derived, never a positional ledger, and the primitive
-makes the verdict table transport-independent:
+`upsert` and `insert` dedup on row identity, never batch position;
+`truncate_insert` does not dedup ([ADR 0014](../adr/0014-writes-are-idempotent-on-content-derived-identity-never-batch-position.md)):
 
 | Mode | Verdict | Mechanism |
 |------|---------|-----------|
@@ -686,26 +632,24 @@ The contract tier (no live database) certifies this document's surface:
 - **Refusals fire.** Upsert with empty `conflict_keys` (never downgraded to
   insert), upsert against `merge_form: "none"`, and any needed-but-undeclared capability produce the
   loud config error, not SQL.
-- **The override surface is the sanctioned one.** A connector may override
-  the §4 hooks plus `session_init_sql`, `verify_tls_state`, and the
-  existing DDL/discovery/TLS hooks — and adds nothing public of its own
-  (helpers are underscore-private, so a stale attribute cannot ride along
-  silently); overriding a private `GenericSQLConnector` or
-  backend internal fails the suite. `StageConnection` is implementable but
-  not connector surface: the transports that satisfy it are the CDK's, and
+- **The override surface is the sanctioned one** ([ADR 0005](../adr/0005-stage-then-merge-is-the-single-sql-write-primitive.md)). A connector
+  class defines `dialect_class` and, optionally, `classify_error`, and
+  nothing else. Its dialect may override the public `SqlDialect` members
+  other than `capabilities`, `for_runtime` and `table_address` — the §4
+  hooks, `session_init_sql`, `verify_tls_state`, the DDL/discovery/TLS and
+  identifier hooks — and adds nothing public of its own; overriding a
+  private `SqlDialect` internal fails the suite. `StageConnection` is
+  implementable but not connector surface: the transports that satisfy it are the CDK's, and
   a connector class or dialect that grows its members fails the same check
   as any other public addition — the write primitive is not extended by
   supplying a second cycle to run it on.
-- **Landing is semantics-free.** For a connector declaring a bulk mechanism,
-  bulk-landed and executemany-landed stages produce identical stage
-  contents against the suite's fakes.
-- **Duplicate rules hold.** Intra-batch duplicate identities collapse
-  first-wins for insert before the mode statement renders; duplicate
-  `conflict_keys` inside one batch fail loudly for upsert; a replayed batch
-  leaves target state unchanged for the exactly-once modes. (The
-  cross-batch collapse inside a coalesced unit is engine code, exercised by
-  engine tests, not by the connector kit.)
 
 The live tier exercises the primitive end-to-end (all modes plus
-restart/replay) on systems that run as Docker service containers. Cloud
-warehouses are contract-tier-only; that is an accepted residual risk.
+restart/replay) on systems that run as Docker service containers; cloud
+warehouses are contract-tier-only ([ADR 0021](../adr/0021-connectors-are-certified-by-the-cdk-conformance-kit-in-their-own-ci.md)).
+Native bulk protocols cannot run against fakes, so landing equivalence is
+a live-tier check: for a connector declaring a bulk mechanism on the live
+connection's transport, the same batch written through that mechanism and
+through executemany leaves identical contents. The live tier also checks
+that intra-batch duplicate identities collapse first-wins for insert, and
+that a replayed batch leaves target state unchanged for insert and upsert.

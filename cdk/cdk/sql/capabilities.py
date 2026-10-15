@@ -1,4 +1,4 @@
-"""Declared SQL dialect capabilities (issue #390; spec sql-write-path §5).
+"""Declared SQL dialect capabilities (issue #390; spec sql-write-path §5; ADR 0005).
 
 SQL-shape capabilities are facts about the target system — catalog
 addressability, session-targeting regime, merge form, bulk-load mechanism,

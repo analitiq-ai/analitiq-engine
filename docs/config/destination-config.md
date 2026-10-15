@@ -18,12 +18,9 @@ also [README.md](../../README.md#environment-variables)); their
 resolution order and layering rules are
 [`settings-reference.md`](settings-reference.md).
 
-Destinations are selected at runtime from the pipeline's
-`connections.destinations` list (indexed by the `DESTINATION_INDEX`
-setting). The destination service uses the same Docker image as the source
-engine (`RUN_MODE=destination`) and loads its connection via
-`PipelineConfigPrep` just like the engine does; credentials are read from
-the local config volume and are **never** transmitted over gRPC.
+The destination service loads its connection from the pipeline's
+`connections.destinations` list, at the `DESTINATION_INDEX` setting (see
+[ADR 0009](../adr/0009-engine-and-destination-are-separate-services-joined-by-grpc-carrying-arrow-ipc.md)).
 
 ## Architecture
 
@@ -47,52 +44,37 @@ the local config volume and are **never** transmitted over gRPC.
 +----------------------+        +----------------------+
 ```
 
-Every connector family lives in the CDK, alongside the shared building
-blocks; the engine keeps only the gRPC server that fronts them
-(`src/destination/server.py`). The current module breakdown is part of
+The CDK's connector families live alongside its shared building blocks,
+and at run time a connector runs in a worker subprocess (see
+[ADR 0008](../adr/0008-connector-code-runs-only-in-an-isolated-worker.md)).
+The module breakdown is part of
 [`engine-architecture.md`](../architecture/engine-architecture.md#module-layout)'s
 module layout, not repeated here.
 
-`GenericSQLConnector` is the single database handler, serving both source
-and destination roles over two transports (`sqlalchemy` and `adbc`); the
-transport split is specified in
+`GenericSQLConnector` (databases, over the `sqlalchemy` and `adbc`
+transports) and `GenericAPIConnector` (APIs) each serve both source and
+destination roles (see
+[ADR 0020](../adr/0020-one-connector-class-serves-both-read-and-write.md) and
+[ADR 0015](../adr/0015-every-sql-destination-uses-one-handler-over-two-transports.md)).
+The transport split is specified in
 [`arrow-and-transport-strategy.md`](../data-path/arrow-and-transport-strategy.md)
 and the write mechanics in
-[`sql-write-path.md`](../data-path/sql-write-path.md). `GenericAPIConnector`
-is the single API connector and serves both roles the same way — one
-connect, one HTTP round trip, one status classification, one paging loop —
-with what varies between an API read and an API write confined to the
-endpoint document's `operations` block, never the class.
+[`sql-write-path.md`](../data-path/sql-write-path.md).
 
 ## Handler registry
 
-Handlers are resolved by the connector's `kind`. Both registries — source
-and destination — are built in one place, `build_registries()`
-(`cdk/cdk/registry.py`), called inside the worker subprocess because that
-is where connector classes execute; neither the engine process nor the
-destination service holds connector code.
-
-Kind defaults are declared once, in `cdk.registry.KIND_DEFAULTS`, as a
-`kind -> (class, roles)` table. **The roles a kind default serves are
-declared in that table, not derived from the class at registration** —
-reading them off the class would mean importing it, and importing the
-class is exactly the cost the table exists to defer. The declaration is
-verified, not trusted blindly: the first time a kind default is actually
-loaded, its declared roles are checked against the class's own capability
-Protocols (`Readable` / `Writable`, `cdk/cdk/contract.py`), and a mismatch
-is a registry defect, not a silent divergence. `database` and `api` serve
-both roles; `file`, `s3` and `stdout` serve destination only — a
-`kind: file` *source* raises `ConnectorNotRegisteredError` rather than
-resolving a class with no read path.
-
-Externally installed connector packages add themselves through the
-`analitiq.source_connectors` / `analitiq.destination_connectors`
-entry-point groups, registering under their `connector_id` — an entry
-point never introduces a new *kind*, only a class for an existing one. A
-kind with neither a kind default nor a registry-discovered class fails at
-worker startup with `ConnectorNotRegisteredError` — the registry's set of
-*runnable* kinds is a subset of the contract's set of *valid* ones, never
-a parallel vocabulary to keep in sync.
+Both registries — source and destination — are built by
+`build_registries()` (`cdk/cdk/registry.py`) inside the worker subprocess
+(see
+[ADR 0008](../adr/0008-connector-code-runs-only-in-an-isolated-worker.md)).
+A connector resolves to the class an installed package registered under
+its `connector_id`, else to its kind's generic class in `cdk.registry.KIND_DEFAULTS` (see
+[ADR 0019](../adr/0019-resolve-a-connector-by-kind-then-connector-id-with-a-generic-class-per-kind.md)).
+The `database` and `api` generic classes serve both roles; the `file`,
+`s3` and `stdout` ones serve destination only, so a `kind: file` *source*
+whose `connector_id` no installed package registers as a source raises
+`ConnectorNotRegisteredError` rather than resolving a class with no read
+path.
 
 ### Handler capabilities
 
@@ -128,10 +110,8 @@ extra (`pip install "analitiq-cdk[arrow]"`).
   rather than misconfigured. There is no fallback to local storage.
 - **Partition path stamping.** A `path_template` with time placeholders
   (`{year}/{month}/{day}/{hour}`) resolves them from the batch's
-  engine-stamped emit instant, never the write-time wall clock, so a
-  replayed batch lands in the same partition directory and overwrites in
-  place. See `emitted_at_unix_ms` in
-  [`grpc-streaming-architecture.md`](../architecture/grpc-streaming-architecture.md).
+  engine-stamped emit instant, `emitted_at_unix_ms` (see
+  [ADR 0014](../adr/0014-writes-are-idempotent-on-content-derived-identity-never-batch-position.md)).
 - **Database DDL type resolution.** When `auto_create_table` is on, DDL
   column types come from the dialect's `render_column_type`, backed by the
   connection-scoped write type map (connection rules over the
@@ -143,11 +123,12 @@ extra (`pip install "analitiq-cdk[arrow]"`).
 
 ## Idempotency
 
-Every write mode has a defined retry-safety verdict, reported per stream
-in the schema ack (`retry_semantics` + reason) and logged at stream start.
-The SQL destination dedups on **row identity** (content-derived), never
-batch position or a commit-ledger table; `batch_seq` is only an ordering
-sequence on the wire.
+Each handler reports a retry-safety verdict per stream in an accepted
+schema ack (`retry_semantics` + reason; see
+[ADR 0013](../adr/0013-prefer-duplicates-over-data-loss.md)).
+`truncate_insert`'s append phase, API `insert` without an `idempotency`
+block, file sinks across a restart, and stdout do not dedup (see
+[ADR 0014](../adr/0014-writes-are-idempotent-on-content-derived-identity-never-batch-position.md)).
 
 ### Database (row identity)
 
@@ -161,15 +142,11 @@ sequence on the wire.
   when the engine (re)starts the read, so the decision survives engine and
   destination restarting independently; the engine never resumes a
   `truncate_insert` stream from a cursor. At-least-once by design.
-- **`insert`** — a row lands only if its identity is not already present:
-  the batch lands in a per-batch stage table and one set-based
-  `INSERT ... SELECT ... FROM stage WHERE NOT EXISTS (...)` applies it,
-  identically on both transports. Identity is the contract primary key,
-  or — for a keyless stream — a synthetic engine-managed `_record_hash`
-  column (SHA-256 of the row content) declared as the table's
-  `PRIMARY KEY`. First occurrence of a duplicate identity wins; `insert`
-  cannot distinguish a retry's re-read from a genuinely conflicting key —
-  a stream that must reconcile changed rows uses `upsert` instead.
+- **`insert`** — a row lands only if its identity is not already present,
+  by an anti-join from the stage (see
+  [ADR 0005](../adr/0005-stage-then-merge-is-the-single-sql-write-primitive.md)
+  and
+  [ADR 0014](../adr/0014-writes-are-idempotent-on-content-derived-identity-never-batch-position.md)).
   Exactly-once where the system enforces the identity constraint;
   at-least-once where it does not (e.g. BigQuery's `NOT ENFORCED` keys,
   where the anti-join is a filter, not a guarantee).
@@ -177,30 +154,25 @@ sequence on the wire.
 ### File / S3 (content-addressed filenames)
 
 Each batch file's name carries the first 16 hex chars of
-SHA-256(serialized bytes); there is no batch-level commit ledger. A true
-replay serializes to the same bytes, hashes to the same filename, and
-overwrites the same file atomically (temp file renamed into place, so a
-crash mid-rewrite cannot truncate committed output). A same-run restart —
-which re-reads the inclusive cursor boundary and re-batches those rows
-into different content — lands in a new file instead of overwriting
-committed data. Duplicates are possible across a restart, drops are not:
-reported as at-least-once.
+SHA-256(serialized bytes), so a true replay overwrites the same file (see
+[ADR 0014](../adr/0014-writes-are-idempotent-on-content-derived-identity-never-batch-position.md)).
+A same-run restart — which re-reads the inclusive cursor boundary and
+re-batches those rows into different content — lands in a new file
+instead of overwriting committed data. Duplicates are possible across a
+restart, drops are not: reported as at-least-once.
 
 ### API (per-record idempotency key)
 
 An API `upsert` is idempotent through the endpoint's own `conflict_keys`.
-For `insert` with a declared `idempotency` block, the guarantee is
-exactly-once **within the provider's replay window** — a retry after the
-provider has expired its idempotency key is not deduped, and may create a
-duplicate. The key value is engine-owned, following the write mode's identity semantics: `insert`
-sends the identity-derived `record_id` (first occurrence wins, mirroring
-the SQL anti-join); `upsert` sends a full-content hash, so an identical
-replay dedups while a changed row gets a new key and the provider applies
-the update. `configure_schema` refuses a header key name that collides
-with a header the connection's transport resolved, and, when the key goes
-in the body (`in: body`), a write refuses a resolved request body that is
-not a JSON object or already carries the key's field. Without the block, API `insert` is at-least-once on a
-same-run restart.
+With a declared `idempotency` block the engine sends a per-record key (see
+[ADR 0014](../adr/0014-writes-are-idempotent-on-content-derived-identity-never-batch-position.md));
+`insert` then reports exactly-once, which holds only if the provider
+dedups on that key, and only **within its replay window**.
+`configure_schema` refuses a header key name that collides with a header
+the connection's transport resolved, and, when the key goes in the body
+(`in: body`), a write refuses a resolved request body that is not a JSON
+object or already carries the key's field. Without the block, API
+`insert` is at-least-once on a same-run restart.
 
 ### Stdout
 
@@ -211,10 +183,10 @@ batch prints again — there is no sink state for a replay to dedup against.
 
 | Field | Description |
 |-------|-------------|
-| `run_id` / `stream_id` | Routing/scoping identifiers, never a dedup key |
-| `batch_seq` | Monotonic ordering/log sequence per stream within a run, never a dedup key |
+| `run_id` / `stream_id` | Routing/scoping identifiers |
+| `batch_seq` | Per-stream batch sequence; restarts at 1 each time the engine (re)starts the read |
 | `cursor` | Opaque token produced by the engine, stored verbatim by the destination |
-| `record_ids` | Content-derived row identities (SHA-256), for DLQ correlation; the `_record_hash` value for a keyless insert |
+| `record_ids` | Content-derived row identities (SHA-256), used as the idempotency key of an API insert-mode endpoint that declares one. The SQL `_record_hash` is computed separately, from the cast row |
 
 Full wire-protocol semantics are in
 [`grpc-streaming-architecture.md`](../architecture/grpc-streaming-architecture.md).
@@ -243,7 +215,7 @@ sink:
 | `not_ready_reason(stream_id)` | Why a batch cannot be taken right now, or `None`. A rejection here attempted nothing, so it acks `NOT_READY`. |
 | `land_empty(batch)` | Override only for a per-batch side effect that must happen even with no records — a full refresh whose truncate is keyed to the first batch. |
 | `unexpected_write_failure(error, …)` | Override to consult a declared error map before the default fatal verdict. |
-| `connect` / `disconnect` / `configure_schema` / `health_check` / `connector_type` | The lifecycle, unchanged. |
+| `connect` / `disconnect` / `configure_schema` / `health_check` / `connector_type` | The lifecycle. |
 
 `land` receives a `LandingBatch`, which carries the batch both ways round
 — `records` for sinks that write dicts, `record_batch` for sinks that stay
@@ -253,8 +225,10 @@ is not taxed for a representation it never reads.
 To refuse a batch, raise `BatchRejected` with the reason and, when the
 sink knows it, a `FailureCategory`; it is fatal and destination-owned by
 default, and a sink that means something else says so. A sink that lands
-rows one request at a time passes `records_written` and
-`failed_record_ids` so the engine dead-letters exactly what did not land.
+rows one request at a time may also pass `records_written` and
+`failed_record_ids`; the engine does not read `failed_record_ids` and
+disposes of the whole batch
+([ADR 0011](../adr/0011-a-batch-is-accepted-or-rejected-whole.md)).
 An `OSError` needs no per-sink handling: one errno table judges every sink
 that writes through a file descriptor, identically for files and stdout.
 

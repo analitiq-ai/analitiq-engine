@@ -10,9 +10,6 @@
 > [source-config.md](../config/source-config.md); and
 > the gRPC streaming protocol to
 > [grpc-streaming-architecture.md](./grpc-streaming-architecture.md).
-> The decisions behind this layer's shape are recorded in
-> [ADR 0003](../adr/0003-the-cdk-is-a-toolbox-not-a-gatekeeper.md) and
-> [ADR 0004](../adr/0004-capability-is-derived-never-declared.md).
 
 ## 1. Overview
 
@@ -20,21 +17,19 @@ The **Connector CDK** (`cdk/`) is a standalone, vendor-neutral library of
 connector building blocks: the capability contract, transports, the
 `ConnectionRuntime`, the type-map engine, the secrets seam, the connector
 registry, and the SQL layer (discovery, DDL, read, write). The **Engine**
-(`src/`) consumes it in-tree to run pipelines. Both layers are
-**cloud-agnostic** — no cloud SDKs, local filesystem and stdout only; where
-data ultimately lands is a deployment concern, not a concern of either layer.
+(`src/`) consumes it in-tree to run pipelines. Neither layer carries a cloud
+SDK in its core dependencies (see
+[ADR 0007](../adr/0007-the-engine-carries-no-cloud-sdk.md)).
 
-The CDK serves two kinds of consumer with the *same* code:
+The CDK serves two kinds of consumer with the *same* code (see
+[ADR 0003](../adr/0003-the-cdk-is-a-toolbox-not-a-gatekeeper.md)):
 
 - **Bulk streaming** — the engine's source-read and destination-write paths
   move data in Arrow batches during a pipeline run.
 - **Synchronous control-plane** — point operations a caller waits on: list
   schemas, list tables, list columns, create table.
 
-The *capability* is separate from the *deployment*: a `discover` /
-`create_table` capability can be served locally, in-tree, by the engine itself,
-or driven by a separate synchronous runtime. The same connector code backs
-both; deployment and hosting of any such runtime are out of scope here.
+Deployment and hosting of a control-plane runtime are out of scope here.
 
 ### The boundary
 
@@ -47,9 +42,9 @@ reusable contract and each runtime a thin consumer of it.
 
 ## 2. The shape: CDK + attachable connector modules
 
-**Drivers are a modular layer — a stable *Connector CDK* plus independently
-packaged *connector modules* — that runtimes consume as thin clients. Neither
-runtime *owns* drivers.**
+Drivers are a *Connector CDK* plus independently packaged *connector modules*,
+consumed by both runtimes (see
+[ADR 0003](../adr/0003-the-cdk-is-a-toolbox-not-a-gatekeeper.md)).
 
 ```
             ┌───────────────────────────────────────────────┐
@@ -71,12 +66,6 @@ runtime *owns* drivers.**
    └───────────────────────────┘        └───────────────────────────────┘
 ```
 
-Neither runtime owning drivers is a deliberate choice, not the absence of
-one — see [ADR 0003](../adr/0003-the-cdk-is-a-toolbox-not-a-gatekeeper.md).
-The same `discover()` capability is reachable locally through the engine —
-the *interface* (a capability) is separate from the *deployment* (who hosts
-the call). Same code, two front doors.
-
 ## 3. What this builds on
 
 Grounding the design in the existing code.
@@ -86,8 +75,8 @@ Grounding the design in the existing code.
 Consumers load the same connector package, reading different subsets as
 needed. The engine reads only the packages the run's pipeline references; a
 separate control-plane runtime resolves the same package from its own
-registry source. The registry resolves the connector class by
-`connector_id`, falling back to the generic class for its `kind`.
+registry source. How the registry resolves the connector class is recorded
+in [ADR 0019](../adr/0019-resolve-a-connector-by-kind-then-connector-id-with-a-generic-class-per-kind.md).
 
 ### Already decoupled — transports and secrets
 
@@ -136,23 +125,14 @@ class SecretsResolver(ABC):
 (`cdk/cdk/registry.py`) keep a `kind` → connector-class map for each role,
 seeded from `KIND_DEFAULTS` and extended by externally pip-installed
 connectors via setuptools entry points (`analitiq.source_connectors` /
-`analitiq.destination_connectors`). Kind defaults are always available —
-`KIND_DEFAULTS` depends on no package metadata, so it works in editable
-installs and under pytest; entry-point discovery is additive and
-best-effort, so a broken plugin is logged and skipped, never fatal. **The
-roles a kind default serves are declared in `KIND_DEFAULTS` itself, not
-derived from the class at registration** — reading them off the class
-would mean importing it, which is exactly the cost the table exists to
-defer. The declaration is checked, not trusted blindly: the first time a
-kind default is actually loaded, its declared roles are verified against
-the class's own capability Protocols (`issubclass` against
-`runtime_checkable` Protocols in `cdk/cdk/contract.py` — the registry holds
-a class, not an instance, at this point), and a mismatch is a registry
-defect, not a silent divergence. The worker subprocess is the
-one caller of `build_registries`, because that is where connector classes
-execute; the engine process holds only the `WorkerReadable` client and
-imports no connector. A duplicate `kind` raises rather than silently
-shadowing.
+`analitiq.destination_connectors`). `KIND_DEFAULTS` depends on no package
+metadata, so it works in editable installs and under pytest. The roles a
+kind default serves, and their `issubclass` check against the
+`runtime_checkable` Protocols in `cdk/cdk/contract.py` when the class is
+first loaded, follow
+[ADR 0019](../adr/0019-resolve-a-connector-by-kind-then-connector-id-with-a-generic-class-per-kind.md).
+`build_registries` runs in the worker subprocess (see
+[ADR 0008](../adr/0008-connector-code-runs-only-in-an-isolated-worker.md)).
 
 `list_schemas` / `list_tables` / `list_columns` are introspection
 operations exposed on `GenericSQLConnector` (`cdk/cdk/sql/discovery.py`),
@@ -174,23 +154,13 @@ constructs `ColumnDef`s directly and calls it with no engine orchestration.
 the direction `create_table` DDL needs. `TypeMapper` has two independent
 directions, never one inverted at runtime.
 
-**Whether a connector can discover, create, read or write is never
-declared.** Capability is two unrelated things (see §4): *protocol conformance*, derived by `isinstance` against the
-`runtime_checkable` Protocols, and *authorization*, enforced by the database
-from the connection's credentials and grants at runtime.
-
 ## 4. The contract (Connector CDK)
 
 The shared library is a **CDK** (*connector development kit — a toolbox of
 reusable building blocks a connector uses, NOT a central engine it must route
 through*) rather than a gatekeeper — see
-[ADR 0003](../adr/0003-the-cdk-is-a-toolbox-not-a-gatekeeper.md) for why.
-
-Everything in the CDK is therefore **vendor-agnostic** — it may know about SQL
-databases *in general*, but nothing about any *specific* database (Postgres vs
-Snowflake vs Clickhouse). The test is: **"would this code change when you add
-Clickhouse?"** If yes, it's vendor-specific and belongs in the connector; if no,
-it's generic and can live in the CDK. By that test, the CDK holds:
+[ADR 0003](../adr/0003-the-cdk-is-a-toolbox-not-a-gatekeeper.md) for why
+and for what belongs in the connector instead. The CDK holds:
 
 1. the **contract** — the operation Protocols (below),
 2. the **transport families** — `transport_factory` + `ConnectionRuntime`
@@ -205,21 +175,15 @@ it's generic and can live in the CDK. By that test, the CDK holds:
    batching/streaming/error handling is battle-tested, not reinvented per
    connector).
 
-Note that items 4–5 *are* database-related — but vendor-neutral. They pass the
-test: adding Clickhouse changes none of them.
-
-What is **NOT** in the CDK — the vendor-specific things that change per database:
-any database's **driver**, **type-map mappings**, or **dialect SQL**. Those ride
-in the connector.
-
 ### The contract
 
 Operations are split into **capability protocols** so a connector implements
 only what it supports (an HTTP-API connector need not implement `create_table`).
-The protocols below are **implemented and shipped** in `cdk/cdk/contract.py`;
-they are `runtime_checkable`, so a runtime selects a capability by `isinstance`,
-never by a declared block. Method names mirror the engine's source/destination
-methods (`read_batches`, `configure_schema`, `write_batch`).
+The protocols below are in `cdk/cdk/contract.py`; they are `runtime_checkable`,
+so a class can be checked against them (see
+[ADR 0004](../adr/0004-capability-is-derived-never-declared.md)). Method names
+mirror the engine's source/destination methods (`read_batches`,
+`configure_schema`, `write_batch`).
 
 ```python
 # cdk/cdk/contract.py  (shape, not verbatim — read the module for the exact signatures)
@@ -308,35 +272,17 @@ so two ways — and the plugin picks based on how well-behaved the database is:
   pagination, exotic types) overrides whatever methods it needs, or implements
   the protocols from scratch. The connector owns this code.
 
-Both run on an **unchanged CDK**. This is what preserves self-service: the
-plugin generates a Clickhouse connector — reusing CDK blocks where it can,
-overriding where Clickhouse is weird — and it works with **no engineer touching
-the shared library**.
+Both run on an unchanged CDK (see
+[ADR 0003](../adr/0003-the-cdk-is-a-toolbox-not-a-gatekeeper.md)).
 
-> **The one real boundary.** Engineers are needed only if a database needs a
-> **brand-new transport family** (*a connection style that is neither SQLAlchemy,
-> nor ADBC, nor HTTP*) — rare; almost every DB fits an existing one. A new
-> *database* never requires CDK work; only a new connection *paradigm* does. The
-> plugin can detect "does this DB fit an existing transport family?" before
-> generating.
+> **Where CDK work is needed:** a **new transport family** (a connection style
+> that is neither SQLAlchemy, ADBC, nor HTTP), a SQL shape the
+> `sql_capabilities` values do not name, or a breaking contract change.
 
-### Capability is not declared
+### Capability
 
-Whether a connector can discover, create, read or write is derived, never
-declared —
-see [ADR 0004](../adr/0004-capability-is-derived-never-declared.md) for
-why it splits into protocol conformance (code-derived, via
-`isinstance(connector, Discoverable)` / `TableCreator`, varying only
-across `kind`) and authorization (a property of the connection's
-credentials / DB grants, enforced by the database at runtime — never
-declared, discovered at runtime or via a preflight probe):
-
-```python
-# capability check = protocol conformance, not config
-if isinstance(connector, Discoverable):
-    schemas = await connector.list_schemas(runtime)
-# authorization is the DB's call — surfaces as a permission error, not a flag
-```
+How a connector's capabilities are decided follows
+[ADR 0004](../adr/0004-capability-is-derived-never-declared.md).
 
 (API connectors are the one place read/write varies *below* the connector level
 — but that is **per-endpoint**, already data-driven by the connector's endpoint
@@ -354,11 +300,8 @@ definitions, not a connector-wide flag.)
   provides both `to_arrow_type(native)` (read direction) and `to_native_type()`
   (write direction), the latter what `create_table` DDL needs. The
   *mappings* are the connector's data, the *mechanism* is the CDK's.
-- **The contract is a versioned package.** A connector declares its
-  `analitiq-cdk` dependency in its own `pyproject.toml` like any other Python
-  package. This is the seam that lets
-  the CDK and connectors evolve independently — a breaking contract change is
-  the *other* (besides a new transport family) thing that involves engineers.
+- **The contract is a versioned package.** The CDK is its own package,
+  `analitiq-cdk` (see [ADR 0003](../adr/0003-the-cdk-is-a-toolbox-not-a-gatekeeper.md)).
 
 ## 5. Module packaging and layout
 
@@ -392,23 +335,23 @@ The package also ships three generated contract artifacts beside the modules
 that read them: the Arrow type grammar, the conversion matrix, and the
 contract-consumption manifest (`cdk/cdk/contract_consumption.json`, the contract
 fields the engine reads, rendered from mypy's type map by
-`tools/contract_consumption.py` and checked current in CI; a field is claimed
-when the engine reads it by any means it actually uses, and an unclaimed field
-is one no runtime path reads -- every loaded document is held as its typed
-contract model, so there is no dict path the census cannot see). All are data
-files, so whether they land in a built distribution is a packaging decision
-rather than a code one — and a distribution missing one imports cleanly and
-fails on first use, in every consumer at once. The publish workflow therefore
-installs the built wheel into a clean environment and reads every document back
-through the installed package, and checks the sdist carries them too, before a
-release can proceed. The same release publishes the manifest as versioned JSON
+`tools/contract_consumption.py` and checked current in CI; a model the engine
+reads as a JSON grammar rather than field by field, such as `ErrorMap`, is
+listed as opaque with no per-field claims — see
+[ADR 0016](../adr/0016-the-pinned-validator-is-the-only-document-gate.md)).
+The grammar and the matrix are owned by
+[ADR 0017](../adr/0017-the-engine-owns-the-arrow-type-vocabulary-and-the-conversion-matrix.md).
+All three are data files, and a distribution missing one imports cleanly and
+fails on first use, so the publish workflow installs the built wheel into a
+clean environment, reads every document back through the installed package,
+and checks the sdist carries them too, before a release can proceed.
+The same release publishes the manifest as versioned JSON
 under `contract-consumption/v{cdk.__version__}/`, the coordinate the contract repo
 pins it by.
 
-A connector is a **self-contained, independently releasable unit** carrying
-everything DB-specific: definition, type-map, its own driver, and as much or as
-little code as that database needs. It depends on the CDK; the CDK never depends
-on it.
+A connector carries its definition, type-map, driver, and whatever code its
+database needs (see
+[ADR 0003](../adr/0003-the-cdk-is-a-toolbox-not-a-gatekeeper.md)).
 
 Two connector shapes, both generated by the plugin, both running on an unchanged
 CDK:
@@ -425,7 +368,7 @@ connectors/postgresql/
 
 **Thick connector** — a quirky database (e.g. Clickhouse). Same layout, but
 `connector.py` overrides whatever the CDK base gets wrong for this DB (dialect
-DDL, pagination, type quirks). The overrides live **here**, never in the CDK.
+DDL, pagination, type quirks).
 
 ```
 connectors/clickhouse/
@@ -436,9 +379,8 @@ connectors/clickhouse/
 
 Two complementary distribution forms:
 
-- **Connector repo** (one per connector in the connector registry) — holds
-  **both** the code (`connector.py` + deps) and the data,
-  versioned together by **git tag** (§8). The installable unit:
+- **Connector repo** — the code and the data at a git tag (see
+  [ADR 0003](../adr/0003-the-cdk-is-a-toolbox-not-a-gatekeeper.md));
   consumers `pip install git+…@vX.Y.Z`.
 - **Registry snapshot** — the data can be
   snapshotted by a registry source for read paths that only need the data; the
@@ -451,10 +393,8 @@ new database end-to-end without an engineer.
 
 ## 6. Attaching a module to the engine
 
-Goal: a user adds a connector to their self-hosted engine without rebuilding the
-world. Modules are **discoverable via Python entry points**, so installing a
-package = attaching a connector. Built-in connectors are seeded explicitly;
-installed packages are discovered additively.
+Installing a connector package attaches it through Python entry points (see
+[ADR 0019](../adr/0019-resolve-a-connector-by-kind-then-connector-id-with-a-generic-class-per-kind.md)).
 
 1. **Install the module** into the engine's environment:
 
@@ -465,12 +405,9 @@ installed packages are discovered additively.
    ```
 
    The package advertises itself via entry points, named by its
-   **`connector_id`** (`postgresql`, not the `database` kind). There is a
-   group per role because the engine keeps a registry per role, but a
-   connector registers the same class in both: one class serves the system
-   in both directions, and the conformance suite refuses a connector that
-   registers two, because a split there is exactly how the two directions
-   drift apart.
+   **`connector_id`** (`postgresql`, not the `database` kind), with the same
+   class in each role's group (see
+   [ADR 0020](../adr/0020-one-connector-class-serves-both-read-and-write.md)).
 
    ```toml
    # connectors/postgresql/pyproject.toml
@@ -481,55 +418,36 @@ installed packages are discovered additively.
    ```
 
 2. **Engine discovers it at startup.** `build_registries(discover=True)`
-   declares each registry's kind defaults from `KIND_DEFAULTS` (lazily —
-   noting which kind each default serves without importing its class), then
-   scans the `analitiq.source_connectors` / `analitiq.destination_connectors`
-   entry-point groups, registering each entry under its `connector_id`. A
-   plugin whose class fails to import, or whose `connector_id` collides with
-   one already registered, is logged and skipped — one broken or
-   double-published connector package must not abort startup. Resolving a
-   connector tries its own `connector_id` first, falling back to the kind
-   default only when no specific class is registered (the thin path, §3).
-   Which role an entry-point connector serves — source, destination, or
-   both — is declared by which entry-point group it registered under, not
-   read off the class: the worker invokes the resolved class directly, no
-   Protocol check at that call, so a class registered under a role it
-   doesn't implement fails at first invocation. `isinstance` against the
-   Protocols is for a caller deciding whether to *offer* an optional
-   capability before trying it (see [ADR 0004](../adr/0004-capability-is-derived-never-declared.md)) —
-   not the invocation gate.
+   declares each registry's kind defaults from `KIND_DEFAULTS`, then scans
+   the `analitiq.source_connectors` / `analitiq.destination_connectors`
+   entry-point groups, registering each entry under its `connector_id`.
+   Load failures, collisions and resolution order follow
+   [ADR 0019](../adr/0019-resolve-a-connector-by-kind-then-connector-id-with-a-generic-class-per-kind.md);
+   how the entry-point group sets a connector's role follows
+   [ADR 0004](../adr/0004-capability-is-derived-never-declared.md).
 
-3. **Discover rides the same install.** Because the registered connector carries
-   the `Discoverable` capability, the same CDK code that serves engine reads also
-   serves `list_schemas` / `list_tables` / `list_columns` locally — no separate
-   implementation.
+3. **Discover rides the same install.** A registered connector that
+   implements `Discoverable` serves `list_schemas` / `list_tables` /
+   `list_columns` from that install (see
+   [ADR 0003](../adr/0003-the-cdk-is-a-toolbox-not-a-gatekeeper.md)).
 
 ## 7. Anti-monolith principles (the rules underneath)
 
-1. **Thin runtimes, fat modules.** If logic can live in a connector module, it
-   does — runtimes only orchestrate.
+1. **Thin runtimes, fat modules** — see
+   [ADR 0003](../adr/0003-the-cdk-is-a-toolbox-not-a-gatekeeper.md).
 2. **Depend on the contract, never the implementation.** A consumer imports the
    CDK interface + a connector by name; it never reaches into a connector's
    internals, and connectors never reach into each other.
-3. **Independently releasable connectors** in a registry. Adding a database =
-   ship a module = data + a capability implementation, no runtime change.
-4. **Capability by protocol conformance, not declaration.** Runtimes check
-   `isinstance` against the operation Protocols; authorization is left to the
-   DB's grants at runtime. No static capability flags to drift.
+3. **Independently releasable connectors** — see
+   [ADR 0003](../adr/0003-the-cdk-is-a-toolbox-not-a-gatekeeper.md).
+4. **Capability by protocol conformance, not declaration** — see
+   [ADR 0004](../adr/0004-capability-is-derived-never-declared.md).
 5. **Stable, versioned seams.** The CDK contract and the `SecretsResolver` /
    registry protocols are versioned; either side evolves without lockstep
    redeploys.
 
 ## 8. Ownership and distribution
 
-The CDK lives in the engine repo (`cdk/`) as a distinct,
-independently-installable package; connector *code* (`connector.py` +
-deps) lives with its JSON definition in the same per-connector repo, one
-repo per connector, code and data versioned together by git tag.
-Consumers install a pinned tag (`pip install git+https://…@vX.Y.Z`); the
-connector-builder plugin commits code and data together and tags a
-release. The CDK is published to PyPI as `analitiq-cdk`, one release per
-`cdk-v*` tag. See
-[ADR 0003](../adr/0003-the-cdk-is-a-toolbox-not-a-gatekeeper.md) for why
-ownership and distribution are shaped this way, including MSSQL's status
-as a first-class module rather than an optional extra.
+Ownership and distribution of the CDK and connector code follow
+[ADR 0003](../adr/0003-the-cdk-is-a-toolbox-not-a-gatekeeper.md). The CDK
+is published to PyPI as `analitiq-cdk` from `cdk-v*` tags.

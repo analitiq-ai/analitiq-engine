@@ -2,7 +2,7 @@
 
 The engine and the cloud control-plane both need to turn a connection's
 connector reference into a concrete class. Resolution happens in two steps
-(ADR §7, "Resolve by kind, then connector_id"):
+(ADR 0019):
 
 1. ``kind`` (the keys of :data:`KIND_DEFAULTS`) selects the family and
    provides the **generic fallback** class for connectors that ship no code

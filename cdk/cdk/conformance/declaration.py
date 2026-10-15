@@ -1,4 +1,4 @@
-"""Declared-vs-implemented consistency (spec sql-write-path sections 5, 10).
+"""Declared-vs-implemented consistency (ADR 0005; sql-write-path sections 5, 10).
 
 ``connector.json`` declares *whether* the system has a SQL shape; the
 dialect class renders *how*. The two must agree, both ways:

@@ -100,6 +100,7 @@ Gate: does a protocol change edit the `proto/` definitions and regenerate the co
 and does it keep one batch, one ack, one cursor persist — no early or windowed acks?
 
 Source: `docs/architecture/grpc-streaming-architecture.md` (Wire Protocol; Key Design Decisions);
+`docs/adr/0010-one-batch-in-flight-per-stream-strictly-in-order.md`;
 `docs/adr/0006-batch-coalescing-is-engine-side.md` (the ack shapes it rules out).
 
 ### R6. One Binding Grammar Across Transports
@@ -184,7 +185,8 @@ Facts a plan can get wrong. Each is owned by the file named; consult it rather t
 - Public repository: no private deployment or cloud references (`.claude/CLAUDE.md`, Coding Rules
   for Engine Repo — local-only file).
 - Runtime: one Docker image in two roles, source and destination, joined by gRPC
-  (`docs/architecture/grpc-streaming-architecture.md`; `docker/`).
+  (`docs/adr/0009-engine-and-destination-are-separate-services-joined-by-grpc-carrying-arrow-ipc.md`;
+  `docs/architecture/grpc-streaming-architecture.md`; `docker/`).
 - Engine layout, pipeline lifecycle, registries: `docs/architecture/engine-architecture.md`.
 - CDK packaging, extras and connector attachment:
   `docs/architecture/connector-module-architecture.md` (§5–§6); CDK release (PyPI, one per `cdk-v*`
@@ -216,4 +218,4 @@ rounds, then the required status checks. Owned by `CONTRIBUTING.md` (CI; Merge R
 - Compliance: `/speckit-plan` evaluates every gate in its Constitution Check; a violation MUST be
   justified in the plan's Complexity Tracking table or the plan changes.
 
-**Version**: 1.0.3 | **Ratified**: 2026-09-24 | **Last Amended**: 2026-10-05
+**Version**: 1.0.4 | **Ratified**: 2026-09-24 | **Last Amended**: 2026-10-14

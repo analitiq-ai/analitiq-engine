@@ -13,7 +13,7 @@ env var name and built-in default are declared once, beside its accessor.
 |---|---|---|
 | Engine + infrastructure defaults | `src/config/settings.py` | Every engine-owned setting, with its environment-variable override, declared once. |
 | Per-pipeline runtime override | The pipeline document's `runtime` block | Overrides the *runtime-tuning* subset only (below) for one pipeline. |
-| Connector / formatter defaults | The connector package; the CDK's batch formatters under `cdk/cdk/formatters/` | Connector- and format-specific values (e.g. an API connector's request timeout/retry policy, a formatter's compression). The engine stays connector-agnostic, so these are never centralised in engine settings. |
+| Connector / formatter defaults | The connector package; the CDK's batch formatters under `cdk/cdk/formatters/` | Connector- and format-specific values (e.g. an API connector's request timeout/retry policy, a formatter's compression); see [ADR 0003](../adr/0003-the-cdk-is-a-toolbox-not-a-gatekeeper.md). |
 
 ## Resolution order
 
@@ -134,10 +134,6 @@ input the engine reads.
 
 ## What is deliberately not centralised
 
-Connector- and formatter-owned defaults (e.g. an API request timeout or
-retry policy, a formatter's delimiter or row-group size) are not engine
-settings: centralising them here would make the engine connector-aware,
-which the engine's design refuses (see
-[`connector-module-architecture.md`](../architecture/connector-module-architecture.md)).
-Find them in the connector package that owns them, or in
-`cdk/cdk/formatters/`.
+Connector- and formatter-owned defaults are not engine settings: they live
+in the connector package or in the CDK, such as `cdk/cdk/formatters/` (see
+[ADR 0003](../adr/0003-the-cdk-is-a-toolbox-not-a-gatekeeper.md)).

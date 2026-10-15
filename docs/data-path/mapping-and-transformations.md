@@ -6,11 +6,9 @@ schema-contract internals see
 [`arrow-and-transport-strategy.md`](arrow-and-transport-strategy.md).
 
 The implementation lives in `src/engine/mapping.py`: `compile_mapping` compiles
-the stream's contract `StreamMapping` once into vectorized `pyarrow.compute`,
-which is applied to each Arrow batch. The engine compiles exactly the
-expression forms and conversion functions the contract declares; that match
-is checked at import, so a contract release that adds or removes one fails
-the engine at startup rather than on the first batch that carries it.
+the stream's contract `StreamMapping`, and the result runs on each Arrow batch
+([ADR 0018](../adr/0018-mappings-compile-to-vectorized-arrow-kernels.md)). The expression forms and conversion functions it compiles are matched
+against the contract's at import ([ADR 0016](../adr/0016-the-pinned-validator-is-the-only-document-gate.md)).
 
 ## Overview
 
@@ -19,9 +17,6 @@ Each target field is built by exactly one **assignment**:
 ```
 Target Field (path + arrow_type)  ←  Value (constant | expression)  ←  Optional validation
 ```
-
-The engine compiles each expression once per stream and evaluates it as
-vectorized Arrow compute over each batch.
 
 ## Source Paths
 
@@ -33,11 +28,8 @@ document to the batch read:
 
 ## Assignments
 
-Assignments are evaluated top to bottom. Each assignment compiles to a closure
-typed `Callable[[pa.RecordBatch], pa.Array]`, so the only input any assignment
-can read is the **source batch** — no in-progress result is threaded through
-evaluation at all, and earlier assignments are therefore **not** visible to
-later ones. Every assignment is a pure function of the source record.
+Assignments are evaluated top to bottom. Each reads only the source batch
+([ADR 0018](../adr/0018-mappings-compile-to-vectorized-arrow-kernels.md)).
 
 A column is built at the **target**'s `arrow_type`.
 
@@ -48,9 +40,7 @@ transform-stage stream failure.
 
 ### Vectorized evaluation: known divergences
 
-The transform is a single Arrow-native path (`compile_mapping`); each op is a
-`pyarrow.compute` kernel applied to a whole column. A few differences are
-inherent to typed, vectorized evaluation:
+Vectorized evaluation ([ADR 0018](../adr/0018-mappings-compile-to-vectorized-arrow-kernels.md)) differs from per-row Python here:
 
 - **Typed intermediates.** Every sub-expression produces a typed Arrow column,
   so a value cannot change type mid-expression the way an untyped Python value
@@ -81,15 +71,14 @@ value is exempt from every rule except `not_null` and `required`:
 | `range` | Numeric comparison |
 | `in_list` | Value must be in the supplied list |
 
-Validation is **batch-wide**: if any row fails any rule, the whole batch is
-rejected with a `ValidationFailure` naming the column and the offending rows.
-The transform does not route individual records. What the stream does with the
-rejected batch is decided by the failed rule's **effective strategy**: the
+A failing row rejects the whole batch ([ADR 0011](../adr/0011-a-batch-is-accepted-or-rejected-whole.md)) with a `ValidationFailure`,
+unless the same batch also carries a mapping defect (below). What the stream
+does with the rejected batch is decided by the failed rule's **effective strategy**: the
 assignment's `validate.error_handling.strategy` when declared, else the
 pipeline's `runtime.error_handling.strategy`. `fail` stops the stream, `dlq`
 dead-letters the source rows and continues, `skip` drops them and continues.
-When rules under different strategies fail on the same batch, the strictest
-one wins (`fail` over `dlq` over `skip`). The batch never reaches the
+When rules under different strategies fail on the same batch, the strategy is
+chosen per [ADR 0011](../adr/0011-a-batch-is-accepted-or-rejected-whole.md). The batch never reaches the
 destination (see [`engine-architecture.md`](../architecture/engine-architecture.md)).
 
 The override's `max_retries` and `retry_delay_seconds` are not read: a rule is
@@ -102,12 +91,10 @@ rejected conversion, a null in a non-nullable column — fails the stream with a
 ## Type Conversion
 
 A field's `target.arrow_type` is the type the engine builds the post-transform
-column to. Whether a given `source arrow_type → target arrow_type` conversion is
-permitted is decided by a single declarative policy — the **conversion matrix**
-(`cdk/cdk/type_map/conversions.py`) — consulted identically at every build
-boundary (the transform retype and the destination
-`SchemaContract.cast_arrow_batch`), so a conversion can never be accepted on one
-boundary and rejected on another. Each pair resolves to one mode:
+column to. The **conversion matrix** (`cdk/cdk/type_map/conversions.py`)
+decides whether a `source arrow_type → target arrow_type` conversion is
+permitted, at the transform retype and at the destination
+`SchemaContract.cast_arrow_batch` ([ADR 0017](../adr/0017-the-engine-owns-the-arrow-type-vocabulary-and-the-conversion-matrix.md)). Each pair resolves to one mode:
 
 - `identity` — same type, passthrough.
 - `auto` — lossless, applied implicitly: a width widening (`Int32 → Int64`),
@@ -129,15 +116,14 @@ boundary and rejected on another. Each pair resolves to one mode:
 
 `runtime_checked` marks a permitted conversion a per-row guard may still reject
 (a narrowing that overflows, a string that will not parse); the build runs with
-`safe=True` so a bad row fails loud rather than truncating.
+`safe=True` ([ADR 0017](../adr/0017-the-engine-owns-the-arrow-type-vocabulary-and-the-conversion-matrix.md)).
 
-The same policy is published as a generated artifact
-(`cdk/cdk/type_map/conversion_matrix.json`, built from the `ARROW_FAMILIES`
-table by `build_conversion_matrix()`) so the mapping authoring UI offers
-exactly the conversions the engine accepts and auto-wires the function an `explicit`
-conversion needs. The artifact states its own version in a top-level `version` field, filled from
-`CONVERSION_MATRIX_VERSION`, so a consumer holding the bytes can name the policy
-it got; the publisher reads that field rather than assigning a version. The frontend consumes it as the `@analitiq-ai/conversion-matrix`
+The policy is published as `cdk/cdk/type_map/conversion_matrix.json`, generated
+from `ARROW_FAMILIES` by `build_conversion_matrix()` ([ADR 0017](../adr/0017-the-engine-owns-the-arrow-type-vocabulary-and-the-conversion-matrix.md)); for each
+source and target family pair it gives the conversion's mode and the function
+an `explicit` conversion needs. Its top-level `version`
+field is filled from `CONVERSION_MATRIX_VERSION`; the versioned-JSON publish
+reads that field rather than assigning a version. The frontend consumes it as the `@analitiq-ai/conversion-matrix`
 npm package (`packages/conversion-matrix/`), which regenerates from that artifact
 on every build and is republished to GitHub Packages whenever the grid changes.
 

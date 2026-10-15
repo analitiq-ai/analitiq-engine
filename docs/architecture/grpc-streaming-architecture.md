@@ -4,7 +4,7 @@
 
 ## Overview
 
-The engine and its destinations run as separate services connected by a gRPC bidirectional stream. The engine extracts and transforms data, then ships each batch to a destination service that writes it. Decoupling the two lets them scale and fail independently, and lets a destination be written in any gRPC-capable language.
+The engine and its destinations run as separate services connected by a gRPC bidirectional stream. The engine extracts and transforms data, then ships each batch to a destination service that writes it (see [ADR 0009](../adr/0009-engine-and-destination-are-separate-services-joined-by-grpc-carrying-arrow-ipc.md)).
 
 ```
 +-------------------------------------------------------------+
@@ -23,7 +23,7 @@ The engine and its destinations run as separate services connected by a gRPC bid
 +-------------------------------------------------------------+
 ```
 
-Both containers run the same Docker image, toggled by `RUN_MODE` (`source` or `destination`), and load identical config from the same `PIPELINE_ID` via `PipelineConfigPrep`. The destination picks its connection with `DESTINATION_INDEX`. See [`docker/docker-compose.yml`](../../docker/docker-compose.yml) for the compose file and [README.md](../../README.md#environment-variables) for the env vars.
+`RUN_MODE` (`source` or `destination`) selects a container's role, and `DESTINATION_INDEX` the destination's connection. See [`docker/docker-compose.yml`](../../docker/docker-compose.yml) for the compose file and [README.md](../../README.md#environment-variables) for the env vars.
 
 ## Wire Protocol
 
@@ -54,11 +54,11 @@ On `StreamRecords` the engine sends a `StreamRequest` carrying either a `SchemaM
 
 ### Payload format: Arrow IPC only
 
-`PayloadFormat` has exactly one real value, `PAYLOAD_FORMAT_ARROW_IPC` (`UNSPECIFIED = 0`). The engine encodes one `pa.RecordBatch` per message with `pa.ipc.new_stream` (`src/grpc/client.py::DestinationGRPCClient.send_batch`); the destination decodes it with `pa.ipc.open_stream` (`src/destination/server.py::DestinationServicer.StreamRecords`). The IPC stream carries the Arrow schema in the same buffer, so batch and schema decode together with no out-of-band coordination. Typed columnar data is preserved end-to-end — there is no dict/JSON round-trip on either side.
+The payload is Arrow IPC (see [ADR 0009](../adr/0009-engine-and-destination-are-separate-services-joined-by-grpc-carrying-arrow-ipc.md)). The engine encodes one `pa.RecordBatch` per message with `pa.ipc.new_stream` (`src/grpc/client.py::DestinationGRPCClient.send_batch`); the destination decodes it with `pa.ipc.open_stream` (`src/destination/server.py::DestinationServicer.StreamRecords`).
 
 ### SchemaMessage is slim
 
-`SchemaMessage` carries only `stream_id`, `version`, `write_mode`, and the sender's ack budget. It does **not** transmit columns, primary keys, or target table — both sides already hold the contract artifacts (loaded by `PipelineConfigPrep` from the shared `PIPELINE_ID`), so the destination looks up its endpoint document by `stream_id`. The server translates the wire message into the CDK-native `SchemaSpec` before calling the handler (the CDK never imports gRPC types).
+The destination looks up its endpoint document by `stream_id` (see [ADR 0009](../adr/0009-engine-and-destination-are-separate-services-joined-by-grpc-carrying-arrow-ipc.md)). The server translates the wire message into the CDK-native `SchemaSpec` before calling the handler (the CDK never imports gRPC types).
 
 ```protobuf
 message SchemaMessage {
@@ -87,7 +87,7 @@ message RecordBatch {
 }
 ```
 
-`emitted_at_unix_ms` is the engine's per-batch emit instant (UTC epoch milliseconds), stamped once in the load stage and re-sent unchanged on every retry of the same batch (`src/engine/stream_processor.py`). The servicer decodes it to a timezone-aware `datetime` and hands it to `write_batch` as `emitted_at`. A time-partitioned destination (file/S3) resolves its `{year}/{month}/{day}/{hour}` placeholders from this value rather than its own write-time clock, so a replayed batch resolves the same output path and overwrites in place instead of drifting into a new partition directory across an hour/day boundary. Sinks without time-based partitioning ignore it; a sink whose `path_template` actually substitutes a time placeholder fails the batch loud if the value is unstamped (epoch 0).
+`emitted_at_unix_ms` is the engine's per-batch emit instant (UTC epoch milliseconds), stamped once per batch and re-sent unchanged on every retry of it (`src/engine/stream_processor.py`). The servicer decodes it to a timezone-aware `datetime` and hands it to `write_batch` as `emitted_at`. A time-partitioned file destination resolves its `{year}/{month}/{day}/{hour}` placeholders from this value (see [ADR 0014](../adr/0014-writes-are-idempotent-on-content-derived-identity-never-batch-position.md)). Sinks without time-based partitioning ignore it; a sink whose `path_template` actually substitutes a time placeholder fails the batch loud if the value is unstamped (epoch 0).
 
 #### Batch-level metadata rides the Arrow schema
 
@@ -99,7 +99,7 @@ An API read's declared `response.metadata` (a provider-reported total, a rate-li
 message Cursor { bytes token = 1; }
 ```
 
-The cursor is opaque to the destination: it stores the bytes and returns them in the ACK, never interpreting them. The engine owns the format, so cross-database cursor typing never leaks into the destination. The token is JSON for debuggability (`src/grpc/cursor.py`):
+The CDK's handlers return the token unread in the ACK (see [ADR 0012](../adr/0012-the-cursor-is-opaque-to-the-destination.md)). The token is JSON for debuggability (`src/grpc/cursor.py`):
 
 ```json
 {"field": "created_at", "value": "2025-01-08T10:00:00Z",
@@ -138,15 +138,13 @@ message BatchAck {
 }
 ```
 
-There is no `PARTIAL_SUCCESS` — batches are all-or-nothing (below).
+There is no partial status (see [ADR 0011](../adr/0011-a-batch-is-accepted-or-rejected-whole.md)).
 
-`failure_summary` answers *what went wrong* (human-readable, free text); `failure_category` answers *who owns the fix* (machine-readable). The engine never parses the summary: nothing in the classification path reads an exception's message or type.
+`failure_summary` is human-readable free text; `failure_category` is machine-readable and names who owns the fix (see [ADR 0001](../adr/0001-two-failure-vocabularies.md)).
 
-Any sender may declare a category — the config-defect and write-failure excepts in `cdk/cdk/sql/generic.py`, every pre-flight guard via `reject_batch`, the destination servicer's own batch-before-schema rejection, and a thick connector that overrides `write_batch`. The declaration is signal, not trust: it is range-checked when read off the wire, and an unrecognised integer degrades to `UNSPECIFIED` rather than propagating or aborting the stream. An in-range value is used as declared.
+Any sender may declare a category — the config-defect and write-failure excepts in `cdk/cdk/sql/generic.py`, every pre-flight guard via `reject_batch`, the destination servicer's own batch-before-schema rejection, and a thick connector that overrides `write_batch`.
 
-`UNSPECIFIED` resolves from the pipeline stage that raised, not from the summary. A destination-load failure reads as `DESTINATION_WRITE_FAILED`, because the load stage establishes exactly that much: the write did not happen. `SchemaAck` carries the same field for the same reason — a destination shell that could not reach its connector worker declares `NOT_READY`, which is the only way the engine can tell that refusal apart from one the customer's configuration caused.
-
-`FAILURE_CATEGORY_INTERNAL` exists so an engine or connector bug can say so on the wire. Without it every internal fault has to impersonate a user-owned failure, which is the confusion the split between this vocabulary and the customer-facing `ErrorCode` exists to prevent — see [ADR 0001](../adr/0001-two-failure-vocabularies.md).
+`SchemaAck` carries the same field: a destination shell that could not reach its connector worker declares `NOT_READY`, so the engine can tell that refusal apart from one the customer's configuration caused without reading the message text.
 
 ## Key Design Decisions
 
@@ -156,77 +154,43 @@ The engine deliberately does **not** set `grpc.keepalive_*` options on the clien
 
 ### Opaque cursor
 
-The destination never parses the cursor; the engine controls its semantics (timestamp + tie-breaker, LSN, composite key, ...). The destination stores the cursor and echoes it back in the ACK; it keeps no batch idempotency table. This keeps cursor typing out of every destination.
+The cursor is opaque to the destination ([ADR 0012](../adr/0012-the-cursor-is-opaque-to-the-destination.md)).
 
-### Row-level, content-derived idempotency
+### Write idempotency
 
-Idempotency is a protocol design choice, enforced at the destination on
-**row identity**, never batch position: `batch_seq` is a monotonic
-ordering/log sequence per stream within a run, never a dedup key, and
-neither are `run_id`/`stream_id`. For a handler and mode that enforces
-row identity, this survives a network failure that drops the ACK after
-the destination already wrote — the engine retries, row identity dedups,
-and no duplicate data lands. Not every handler enforces it: API `insert`
-without a declared idempotency block and the append phase of SQL
-`truncate_insert` have no identity to dedup on and report at-least-once,
-so an ACK lost there means the retry's rows land again. Per-handler
-mechanics (which write mode dedups how, and which report at-least-once)
-are specified in [destination-config.md](../config/destination-config.md#idempotency);
-this section covers only what is a property of the *protocol*, not of any
-one handler.
+Write idempotency is decided in [ADR 0014](../adr/0014-writes-are-idempotent-on-content-derived-identity-never-batch-position.md). Per-handler mechanics, including which write modes report at-least-once, are in [destination-config.md](../config/destination-config.md#idempotency).
 
-**A destination that does not dedup itself is at-least-once on a
-same-`RUN_ID` retry.** The engine keeps no in-run pre-send skip, so a
-restart re-sends already-ACKed batches; a positional pre-send skip cannot
-be made correct without reintroducing the row-drop this design removes
-(an advancing cursor re-batches the same `batch_seq` over different rows).
-Every handler reports its retry-safety verdict per stream in the
-`SchemaAck` (`retry_semantics` + `retry_semantics_reason`, forwarded
-verbatim across the worker-proxy hop), and the engine logs it at stream
-start — the operator learns which streams may duplicate on a restart
-before any data moves.
-
-**The declaration is reported, never consulted: the retry does not read
-it.** Conditioning the retry on it would mean failing a batch on an
-at-least-once sink to avoid a duplicate — trading a possible duplicate for
-a certain data loss. The trade is taken everywhere: on an exactly-once
-stream, `ALREADY_COMMITTED` (or row-identity dedup) resolves a
-committed-before-crash batch on resend; on an at-least-once one, the
-resend duplicates rather than drops. That is Kafka Connect with
-`enable.idempotence=false`, and Airbyte and Singer at every sink — no
-comparable tool fails a batch to avoid a duplicate.
+Each handler reports a retry-safety verdict per stream in an accepted `SchemaAck` (`retry_semantics` + `retry_semantics_reason`). The worker proxy re-reports the worker's verdict, or the at-least-once default when the worker sent none. The engine reads it only to log it at INFO at stream start, not to gate a retry (see [ADR 0013](../adr/0013-prefer-duplicates-over-data-loss.md)).
 
 ### All-or-nothing batches
 
-A batch wholly succeeds or wholly fails. The cursor advances only on `SUCCESS`, there is no partial-rollback bookkeeping, and DLQ routing is per-batch. This is why `AckStatus` has no partial value.
+A batch is accepted or rejected whole, though a rejected batch may be partly written ([ADR 0011](../adr/0011-a-batch-is-accepted-or-rejected-whole.md)).
 
 | Failure | AckStatus | Engine action |
 |---------|-----------|---------------|
 | ACK lost after write (replay), SQL destination | `SUCCESS` | Row identity dedups the rewrite; persist cursor, continue |
 | ACK lost after write (replay), file destination | `SUCCESS` | Same bytes hash to the same filename; the rewrite overwrites the same file; persist cursor, continue |
 | Connection drop / timeout / deadlock, reported by the destination | `RETRYABLE_FAILURE` | Retry the whole batch with backoff up to `max_retries`, then the error strategy decides |
-| No ack at all: stream torn down, peer closed, ACK timed out, rebuild failed | `RETRYABLE_FAILURE`, synthesized by the client | Same. No connector verdict exists, so none is fabricated |
+| No ack at all: stream torn down, peer closed, ACK timed out, rebuild failed | `RETRYABLE_FAILURE`, synthesized by the client | Same (see [ADR 0013](../adr/0013-prefer-duplicates-over-data-loss.md)) |
 | Constraint violation / type error | `FATAL_FAILURE` | The stream fails; under `dlq` the whole batch is written out first |
 
 ### One verdict per batch
 
-The engine reaches exactly one answer for a batch, in one place: `src/engine/batch_policy.py`. A `BatchPolicy` is bound once per stream from `error_strategy` + `max_retries`, owns the whole send -> ack -> backoff-retry loop, and returns one terminal `Disposition` — `Committed(cursor)`, `AlreadyCommitted`, `DeadLetter(report)`, `Skipped(report)` or `Failed(report)`. `StreamProcessor` acts on that verdict; it does not re-derive it. Four rules hold it in place.
+A batch's verdict comes from `src/engine/batch_policy.py`. A `BatchPolicy` is bound once per stream from `error_strategy` + `max_retries`, owns the whole send -> ack -> backoff-retry loop, and returns one terminal `Disposition` — `Committed(cursor)`, `AlreadyCommitted`, `DeadLetter(report)`, `Skipped(report)` or `Failed(report)`. `StreamProcessor` acts on that verdict, except that a retry-exhausted first batch of a `truncate_insert` stream fails the stream whatever the verdict. Three rules hold it in place.
 
-**A transport failure is retryable on every path, decided where it is detected.** A send that reaches no ack — a torn-down stream, a closed peer, an ACK timeout, a failed rebuild — means *unknown*, not *failed*. `src/grpc/client.py` answers RETRYABLE at every such site and nothing downstream restates it. Before this, the same event was fatal on the direct engine path and retryable through the worker proxy, which remapped it. Retries stay bounded by `max_retries`; the duplicate a resend may cause is the accepted cost (see the at-least-once matrix above).
+**A transport failure is retryable, decided where it is detected.** A send that reaches no ack — a torn-down stream, a closed peer, an ACK timeout, a failed rebuild — is answered RETRYABLE in `src/grpc/client.py`, bounded by `max_retries` (see [ADR 0013](../adr/0013-prefer-duplicates-over-data-loss.md)).
 
-**The retry does not consult `RetrySemantics`.** The per-stream declaration is an operator report, not a gate. `BatchPolicy`'s constructor takes no semantics argument.
+**The cursor rides the success variant.** `Committed` is the only disposition with a cursor field (see [ADR 0013](../adr/0013-prefer-duplicates-over-data-loss.md)). An ack that pairs a cursor with a failure status is answered with a contract-violation verdict naming the peer that sent it.
 
-**The cursor rides the success variant.** `Committed` is the only disposition with a cursor field, so a failed batch cannot advance the checkpoint — the invariant is the type, not a rule policed at three hops. `ALREADY_COMMITTED` carries none either: the checkpoint is an artifact of a commit *this run* confirmed, and a replay confirmed none; the watermark advances on the next batch this run commits. An ack that pairs a cursor with a failure status is a connector defect, and the engine answers it with an explicit contract-violation verdict naming the peer that sent it rather than dropping the cursor and carrying on — silent repair is what leaves a broken connector undetectable. Singer persists STATE only after a durable write, Airbyte routes state through the destination, and Kafka Connect commits offsets only after the producer acks; all three make the checkpoint an artifact of a confirmed commit rather than a nullable field plus a rule.
-
-**One loop, one reaction ladder.** The policy executes the send, so there is no second call site to diverge from: the batch loop and the zero-batch synthetic truncate reach their verdict the same way and are acted on by the same ladder. `error_strategy` (this repo's `errors.tolerance`) belongs to the policy, not to the failure report: it maps a retry-exhausted batch to `DeadLetter` / `Skipped` / `Failed`. A `FATAL_FAILURE` verdict fails the stream whatever the strategy — `dlq` still writes the whole batch out on the way. This is Kafka Connect's `RetryWithToleranceOperator` taken one step further.
+**One loop, one reaction ladder.** The policy executes the send, so there is no second call site to diverge from: the batch loop and the zero-batch synthetic truncate reach their verdict the same way and are acted on by the same ladder. `error_strategy` (the pipeline's `runtime.error_handling.strategy`) belongs to the policy, not to the failure report: it maps a retry-exhausted batch to `DeadLetter` / `Skipped` / `Failed`. A `FATAL_FAILURE` verdict follows [ADR 0011](../adr/0011-a-batch-is-accepted-or-rejected-whole.md).
 
 ### Strict in-order processing
 
-The client sends a batch, awaits its ACK, then sends the next (`send_batch` blocks on the response queue). In-order ACKs keep cursor checkpointing monotonic.
+One batch is in flight per stream: the stream processor sends the next batch only after `send_batch` returns, which is when its ACK arrives or the send fails (ACK timeout, dead stream) (see [ADR 0010](../adr/0010-one-batch-in-flight-per-stream-strictly-in-order.md)).
 
-### Record IDs for DLQ correlation
+### Record IDs
 
-`record_ids` are content-derived row identities (SHA-256 of the row content), parallel to the payload rows and stable across retries, so a DLQ'd row traces back to its source record even after a batch is reprocessed. For a keyless `insert` stream the same hash is the `_record_hash` primary-key value written to the destination.
+`record_ids` are content-derived row identities, parallel to the payload rows and stable across retries (see [ADR 0014](../adr/0014-writes-are-idempotent-on-content-derived-identity-never-batch-position.md)).
 
 ## Type Map (code surfaces)
 
@@ -277,8 +241,7 @@ Engine                                    Destination
   |-- RecordBatch (seq=1) -------------------->|
   |                      [worker crashed / stream torn down mid-write]
   |            X  (no BatchAck)                |
-  | [client synthesizes RETRYABLE: no verdict  |
-  |  exists, so none is fabricated; the stream |
+  | [client synthesizes RETRYABLE; the stream  |
   |  is rebuilt and the batch resent]          |
 ```
 

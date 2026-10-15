@@ -88,38 +88,31 @@ src/
 └── main.py                  # Dual-mode entrypoint (RUN_MODE = source | destination)
 ```
 
-The engine has zero cloud SDK dependencies. State, logs, DLQ, and
-metrics use the local filesystem and stdout; downstream ingestion by an
-external log/metrics shipper is a deployment concern, not an engine concern.
+State and the DLQ are written to the local filesystem; logs go to stdout (see
+[ADR 0007](../adr/0007-the-engine-carries-no-cloud-sdk.md)). The state,
+metrics and DLQ marker lines are logged at INFO, so a log level above INFO
+(`LOG_LEVEL` or the pipeline's `runtime.logging.log_level`) suppresses them.
 
 ### Incremental state restore
 
-An incremental stream's resume cursor is written two ways: to an
-`ANALITIQ_STATE` stdout log line the external shipper harvests into durable
-storage (cloud), and to a **per-stream checkpoint file**
-`state/{pipeline_id}/{stream_id}.json` = `{"cursor": <value>}`
-(`CursorStore`, via `StateManager.save_stream_checkpoint`). Each stream owns its
-own file and writes it on **every destination ACK**, so concurrent streams never
-contend on a shared file and a crash loses at most the last un-ACKed batch.
-
-The stored value is the **committed (destination-ACKed) high-water mark** —
-never the source's pre-ACK position (the source advances its cursor as it yields
-batches, ahead of the ACK). `save_cursor`, which relays that pre-ACK position
-from the source worker, updates only the in-run cache and is never persisted. So
-a stream that failed or never ACKed a batch resumes from its last safe bookmark
-instead of skipping rows that never landed, and a stream with no checkpoint
-resumes with a full re-scan.
+An incremental stream's durable resume cursor advances only when a destination
+ACK commits a batch that carries one. The engine then writes it to the stream's
+own checkpoint file, `state/{pipeline_id}/{stream_id}.json` =
+`{"cursor": <value>}`, and logs an `ANALITIQ_STATE` line at INFO (see
+[ADR 0007](../adr/0007-the-engine-carries-no-cloud-sdk.md)). A failed
+checkpoint write does not fail the run; the file keeps its
+previous content. After a crash,
+the next run resumes from the last checkpointed cursor, re-reading the
+boundary as [ADR 0013](../adr/0013-prefer-duplicates-over-data-loss.md)
+records; a `truncate_insert` stream re-reads from the start.
+A stream with no readable checkpoint resumes with a full re-scan.
 
 Restore is lazy: `get_cursor` reads a stream's checkpoint file at the start of
 its run (`src/state/store.py:CursorStore`, `src/state/state_manager.py`). The
 two delivery paths converge on the same files: in the cloud each task starts
 with an empty `state/`, so the deployment delivers the per-stream files in the
 config bundle from whatever it harvested off the prior run; locally the files
-the prior run wrote are read directly. Either way the engine only reads resolved
-local files and never reaches for cloud storage — exactly as it does for secrets
-and config. Delivering the cursors as bundle files rather than an env var also
-keeps a high-stream-count pipeline clear of any size limit the deployment
-imposes on a task's launch parameters.
+the prior run wrote are read directly.
 
 Each cursor carries its type. A `datetime`/`date` travels as a tagged
 `{"__type__": ..., "value": ...}` value — the same form the on-disk checkpoint
@@ -128,30 +121,23 @@ and the gRPC cursor token use — so a timestamp cursor comes back as a
 cursor whose value looks like a date stays a string. The type is carried
 end-to-end, never guessed from a value's shape.
 
-A resume reads inclusively (`>=`) from the last committed high-water mark, so
-the boundary row is re-read. This keeps a non-unique cursor lossless: a row
-that arrives at the boundary value between runs is still read, where an
-exclusive `>` would filter it out at the source and drop it. The default
-`upsert` write mode dedups the re-read against its `conflict_keys`; an `insert`
-stream re-reading the boundary fails loud on the duplicate key rather than
-silently losing rows.
+A SQL resume reads inclusively (`>=`) from the checkpointed cursor, so the boundary row is re-read (see
+[ADR 0013](../adr/0013-prefer-duplicates-over-data-loss.md)).
 
 ## Pipeline Lifecycle
 
 1. `src.main` reads `RUN_MODE`. `source` runs the pipeline engine;
    `destination` runs the gRPC destination server (see
-   [`grpc-streaming-architecture.md`](grpc-streaming-architecture.md)).
+   [ADR 0009](../adr/0009-engine-and-destination-are-separate-services-joined-by-grpc-carrying-arrow-ipc.md)).
 2. `PipelineRunner` (`src/runner.py`) instantiates `PipelineConfigPrep`,
    which:
    - discovers project root by locating `pipelines/manifest.json`,
    - finds the manifest entry matching `PIPELINE_ID`, which names the
      pipeline's package directory,
-   - reads the run's workspace -- the manifest, the pipeline package, and
-     the packages of the connections it names and their connectors -- and
-     refuses the run unless the published validator's verdict on it
-     passes (`src/config/run_workspace.py`),
-   - parses the pipeline, stream, connection and connector documents
-     from the texts that verdict graded,
+   - gates the run's workspace through the published validator
+     (`gate_run`) and parses the pipeline, stream, connection and
+     connector documents from the graded texts (see
+     [ADR 0016](../adr/0016-the-pinned-validator-is-the-only-document-gate.md)),
    - builds a `ConnectionRuntime` per connection (with a per-connection
      secrets resolver),
    - resolves every `endpoint_ref` to its endpoint JSON.
@@ -244,22 +230,17 @@ Three error fields appear on the record, with distinct audiences:
 
 - `error_code` — the enum above. Customer-safe. Set on `failed` (and `partial`
   where a dominant cause exists); `None` on success.
-- `error_message` — a short, fixed, per-code human-readable message. Carries no
-  exception text, so it cannot leak secrets, driver internals, or stack traces.
-  Customer-safe.
-- `error_detail` — a structured failure summary built from allowlisted-safe
-  tokens only: stage labels, error codes, and exception *class names* read off
-  the live objects (`stage/CODE:ExceptionType`), never message text. It is safe
-  by construction — no driver internals, query fragments, or credentials can
-  appear, so there is nothing to scrub. **Internal-only** nonetheless: the
-  control plane must not forward it externally. The full message text stays in
-  the engine logs.
+- `error_message` — a fixed per-code message. Customer-safe.
+- `error_detail` — a structured failure summary, such as
+  `stage/CODE:ExceptionType`. **Internal-only**.
 
-Classification is **structured-first**. The engine stamps a `FailureTag` (a
-definite `(error_code, stage)`) on the exception at the raise site, where it
-already knows the stage and side: the extract / transform / load stage
-boundaries, the destination handshake, and the config phase. `classify_exception`
-reads those tags and uses them verbatim — deterministic, no text matching. For an
+Neither carries exception message text (see
+[ADR 0023](../adr/0023-customer-error-text-is-built-only-from-allowlisted-tokens.md)).
+
+The engine stamps a `FailureTag` (a definite `(error_code, stage)`) on the
+exception at the extract / transform / load stage boundaries,
+the destination handshake, and the config phase. `classify_exception` reads
+those tags (see [ADR 0001](../adr/0001-two-failure-vocabularies.md)). For an
 aggregated `ExceptionGroup` (every stream failed) the highest-priority tag across
 the leaves wins, and `error_detail` keeps every per-stream leaf rather than
 collapsing to `All streams failed (N sub-exceptions)`.
@@ -290,50 +271,12 @@ Four structured signals cross process boundaries so the tag survives isolation:
   category directly (`CONFIG_INVALID` / `DESTINATION_WRITE_FAILED` /
   `INTERNAL`) instead of reading the `failure_summary` prose.
 
-A connector may declare its driver's failure taxonomy as data, in its
-`error_map`; HTTP status codes are matched at the HTTP call site rather
-than off an exception. The engine alone derives the verdicts (`AckStatus`,
-`FailureCategory`, `ErrorCode`) from a declared category; connectors never
-self-declare verdicts. Classification happens at the failure's birth site:
-the boundary that just caught the driver's error (the CDK write ladder, the
-ADBC boundary, the source worker, both API connectors) matches the
-immediate exception — plus at most its single explicit driver link,
-SQLAlchemy's `orig` or `raise ... from` — against the declared map, and the
-verdict crosses process boundaries as the structured signals above (the
-deterministic flag, the wire `declared_category`, the ack's failure
-category). Nothing downstream re-derives a declared classification from
-exception chains or text, so a declaring connector gets deterministic
-classification for declared identifiers with zero connector Python. A
-connector whose native signal needs more than a flat attribute read (nested
-body inspection, a computed match) overrides
-`BaseDestinationHandler.classify_error()` instead, consulted only when the
-declarative map finds nothing.
+When a connector's `error_map` claims a failure, the verdict derived from the
+matched category crosses process boundaries as structured signals (see
+[ADR 0022](../adr/0022-connectors-declare-driver-failures-as-facts.md)).
 
-Engine-side classification reads no exception type and no message text at
-all — there is no phrase table and no class-name table. When nothing was
-declared, the code comes from the stage that raised
-(`default_code_for_stage`), and every stage boundary tags unconditionally so
-that default always exists.
-
-The stage defaults are asymmetric on purpose. A destination-load failure
-defaults to `DESTINATION_WRITE_FAILED` because the stage establishes the
-whole of that claim: the write did not happen. A source-extract failure
-defaults to `INTERNAL`, because each source code names a *mechanism* — the
-host did not answer, the credentials were refused, the quota ran out — and
-the stage observed none of them. A connector declaring an `error_map`
-supplies the mechanism; one that does not leaves a gap `INTERNAL` reports
-rather than papers over. The side is not lost either way: it rides the tag's
-stage label into `error_detail`, which reads
-`source_extract/INTERNAL:ReadError`.
-
-The `error_code` enum is the stable, audited contract. An exception that
-reaches the runner with no tag is a raise site missing its boundary — an
-engine defect, logged at ERROR and reported `INTERNAL`, so the hole is
-findable instead of absorbed into a plausible code. A verdict is never a
-secret leak (only class names and codes ever reach `error_detail`) and never
-a cross-stage error (the stage is always known from the tag). The two
-vocabularies behind this — what a peer declares versus what the customer is
-told — are separated in [ADR 0001](../adr/0001-two-failure-vocabularies.md).
+For how a code is chosen when nothing was declared, see
+[ADR 0001](../adr/0001-two-failure-vocabularies.md).
 
 ## ConnectionRuntime and Transports
 
@@ -346,26 +289,18 @@ Each connection loaded by `PipelineConfigPrep` becomes a
   (`cdk/cdk/registry.py`), not by config prep.
 - When the connector declares a `transports` block, builds the actual
   transport (SQLAlchemy async engine, aiohttp ClientSession, etc.) via
-  `cdk/cdk/transport_factory.py`. The factory keeps resolution and
-  construction apart, so no live object ever crosses to the connector
-  side:
+  `cdk/cdk/transport_factory.py` (see
+  [ADR 0008](../adr/0008-connector-code-runs-only-in-an-isolated-worker.md)):
   - `resolve_transport_spec` — trusted side. Renders the selected
     transport into a JSON-safe spec (DSN with secrets in place,
     `db_kwargs`, TLS mode + CA PEM, headers, engine kwargs) through a
     `Resolver` carrying `DEFAULT_FUNCTIONS`, via the per-kind resolvers
     `resolve_sqlalchemy_spec` and `resolve_http_spec`.
-  - `resolve_transport_specs` — the same, for the whole set a run may
-    dispatch through: the default plus every transport an operation's
-    `request.transport_ref` names. Resolved together because it is the
-    last moment the secrets are in reach; the connection scrubs them as
-    soon as materialization ends, so a transport whose spec was not
-    resolved by then can never be opened. Which refs those are is
-    derived from the run's endpoint documents by
+  - `resolve_transport_specs` — the same, for the default plus the
+    transports named by the `request.transport_ref` of the operations
+    the worker's role runs, as derived from the run's endpoint documents by
     `src/worker/shell.build_bootstrap` (via
-    `cdk.api.request.endpoint_transport_refs`), never by resolving every
-    transport the connector declares — a connector's auth, login and
-    discovery transports belong to connection setup, and their secrets
-    need not be in a run's connection blob at all.
+    `cdk.api.request.endpoint_transport_refs`).
   - `build_transport_from_spec` — connector side. Dispatches on
     `transport_type` to the per-kind builder
     (`build_sqlalchemy_from_spec`, `build_adbc_from_spec`,
@@ -413,8 +348,8 @@ value: params carry bearer tokens and continuation tokens.
 
 ## Source Connector Layer
 
-The engine ships no source connector. Both families live in the CDK, and
-each is one class serving read and write:
+Both connector families live in the CDK (see
+[ADR 0020](../adr/0020-one-connector-class-serves-both-read-and-write.md)):
 
 - `GenericSQLConnector` (`cdk/cdk/sql/generic.py`) implements four
   capability Protocols from `cdk/cdk/contract.py` (`Readable` / `Writable`
@@ -427,8 +362,8 @@ each is one class serving read and write:
   (`cdk/cdk/api/page_loop.py`) with one adapter per scheme — see
   [ADR 0002](../adr/0002-one-stop-rule-for-every-paging-scheme.md).
 
-The one attribute either class exposes for a connector package to override
-is its dialect (`SqlDialect`, `ApiDialect`): pure translation, no I/O. See
+Each class's dialect (`SqlDialect`, `ApiDialect`) is its per-system
+override seam. See
 [`connector-module-architecture.md`](connector-module-architecture.md) for
 the full CDK contract.
 
@@ -438,10 +373,10 @@ Connector classes are resolved through `ConnectorRegistry`
 (`cdk/cdk/registry.py`), constructed by `build_registries()`. There
 is no `HandlerRegistry`.
 
-The engine binds no connector class. Every kind default is a CDK generic
-class named once in `cdk.registry.KIND_DEFAULTS`, which maps a kind to a
-`module:ClassName` string, the roles it serves, and the extra that
-importing it needs:
+Each kind's default is a CDK generic class named in
+`cdk.registry.KIND_DEFAULTS`, which maps a kind to a `module:ClassName`
+string, its roles, and the extra that importing it needs (see
+[ADR 0019](../adr/0019-resolve-a-connector-by-kind-then-connector-id-with-a-generic-class-per-kind.md)):
 
 | kind | kind default | roles | extra |
 |------|--------------|-------|-------|
@@ -451,29 +386,20 @@ importing it needs:
 | `s3` | `cdk.file.generic:GenericFileConnector` | destination | `file` |
 | `stdout` | `cdk.stdout.generic:GenericStdoutConnector` | destination | `arrow` |
 
-The table holds strings, not classes, so reading the kind vocabulary costs
-no transport: only resolving a kind imports one, and a kind whose transport
-is absent fails naming the extra to install. `build_registries()` seeds both
-registries from that one table. **The roles column is a declaration, not a
-value read off the class** — reading it off the class would mean importing
-it, which is exactly the cost the table exists to defer. It is verified,
-not trusted blindly: the first time a kind default actually loads, its
-declared roles are checked against the class's own capability Protocols
-(`issubclass` against `Readable` / `Writable`, `cdk/cdk/contract.py` — the
-registry holds a class, not an instance, at this point), and a mismatch is
-a registry defect. So `file`, `s3` and `stdout` have no source
-default at all, and a `kind: file` source fails loud instead of resolving a
-class with no read path.
+`build_registries()` seeds both registries from that table. A kind default
+is imported on first resolve, where a missing transport fails naming the
+extra to install and the declared roles are checked against `Readable` /
+`Writable`. `file`, `s3` and `stdout` have no source default, so a
+`kind: file` source that no installed package registers fails with
+`ConnectorNotRegisteredError`.
 
-`build_registries()` is called inside the spawned worker subprocess, because
-that is where connector classes execute. The engine process holds only the
-`WorkerReadable` client and never loads connector code.
+`build_registries()` runs inside the spawned worker subprocess (see
+[ADR 0008](../adr/0008-connector-code-runs-only-in-an-isolated-worker.md)).
 
-Externally installed connector packages add themselves on top through the
+Externally installed connector packages register through the
 `analitiq.source_connectors` and `analitiq.destination_connectors`
-entry-point groups. A package states its roles by which groups it registers
-under; a kind default states them through its declared roles in
-`KIND_DEFAULTS`, checked against the Protocols its class implements.
+entry-point groups (see
+[ADR 0004](../adr/0004-capability-is-derived-never-declared.md)).
 
 ## Structured Logging
 
