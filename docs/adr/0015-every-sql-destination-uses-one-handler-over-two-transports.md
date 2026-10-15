@@ -16,7 +16,8 @@ affects:
   - type: path
     pattern: "cdk/cdk/connection_runtime.py"
 provenance:
-  authoredBy: human
+  authoredBy: agent
+  ratifiedBy: "@Analitiq-Bot-Wonka"
   sourceArtifact: docs/data-path/arrow-and-transport-strategy.md
 ---
 
@@ -51,6 +52,10 @@ We serve every SQL destination through one handler, `GenericSQLConnector`, over 
 ## Trade-offs
 
 Every write-path rule must hold on both transports, which is only tractable because the write primitive is shared. A system whose best driver is neither SQLAlchemy nor ADBC waits for one of them to cover it.
+
+Known exceptions in code:
+
+- The registry does not require a database connector's own class to subclass `GenericSQLConnector`; an installed class wins over it on `connector_id`, and only the conformance kit refuses one that does not extend it ([ADR 0019](0019-resolve-a-connector-by-kind-then-connector-id-with-a-generic-class-per-kind.md)).
 
 ## Consequences
 

@@ -18,7 +18,8 @@ affects:
   - type: path
     pattern: "packages/conversion-matrix/**"
 provenance:
-  authoredBy: human
+  authoredBy: agent
+  ratifiedBy: "@Analitiq-Bot-Wonka"
   sourceArtifact: docs/data-path/arrow-and-transport-strategy.md
 ---
 
@@ -30,7 +31,7 @@ Many surfaces need the Arrow family names and their parameters: the `arrow_type`
 
 ## Decision
 
-We declare every Arrow family once, in the CDK's `ARROW_FAMILIES` table, with its parameter grammar, its conversion kind and its pyarrow bindings. The parser, the conversion policy (`classify_conversion`, which reasons only in conversion kinds) and the two published artifacts are derived from that table. The conformance probe set is built from it too, with hand-written exemplars for the integer-parameterized and structural families. The artifacts are the grammar from `build_arrow_type_grammar` and `conversion_matrix.json` from `build_conversion_matrix`. One conversion matrix decides every `source -> target` conversion. The transform retype and `SchemaContract.cast_arrow_batch` both consult it through `classify_arrow_conversion`, and both execute with `pc.cast(safe=True)`, so a bad row fails loudly instead of being truncated. Each artifact states its own version (`GRAMMAR_VERSION`, `CONVERSION_MATRIX_VERSION`) in its bytes. Both ship inside the CDK distribution, and the CDK release is gated on reading them back from the built wheel in a clean environment and on finding them in the sdist. The frontend consumes the matrix as `@analitiq-ai/conversion-matrix`, and the plugins contract vendors a pinned copy of the grammar.
+We declare every Arrow family once, in the CDK's `ARROW_FAMILIES` table, with its parameter grammar, its conversion kind and its pyarrow bindings. The parser, the conversion policy (`classify_conversion`, which reasons only in conversion kinds) and the two published artifacts are derived from that table. The conformance probe set is built from it too, with hand-written exemplars for the integer-parameterized families. The artifacts are the grammar from `build_arrow_type_grammar` and `conversion_matrix.json` from `build_conversion_matrix`. One conversion matrix decides every Arrow-to-Arrow `source -> target` conversion. The transform retype and `SchemaContract.cast_arrow_batch` both consult it through `classify_arrow_conversion`, and both execute with `pc.cast(safe=True)`, so a bad row fails loudly instead of being truncated. Each artifact states its own version (`GRAMMAR_VERSION`, `CONVERSION_MATRIX_VERSION`) in its bytes. Both ship inside the CDK distribution, and the CDK release is gated on reading them back from the built wheel in a clean environment and on finding them in the sdist. The frontend consumes the matrix as `@analitiq-ai/conversion-matrix`, and the plugins contract vendors a pinned copy of the grammar.
 
 ## Options considered
 
@@ -58,6 +59,9 @@ Changing the matrix's content requires a version bump: the publisher refuses to 
 
 - Easier: a new family reaches the parser, the policy and every consumer from one edit; an integer-parameterized or structural family also needs a probe exemplar, and the conformance kit refuses to run until it has one.
 - Harder: changing the policy is a cross-repo release, not a local fix.
-- Known exception: `SchemaContract` parses strings with a declared `source_format` from Python values, not Arrow-to-Arrow. That path can end in `pc.cast(safe=False)` and is outside the matrix.
+- Known exception: `SchemaContract.from_pylist`, which builds the API and SQLAlchemy source reads from Python values, is outside the matrix. It parses ISO strings into temporal columns, which the matrix forbids as a cast, and a declared `source_format` path can end in `pc.cast(safe=False)`.
+- Known exception: only SQL connectors run `SchemaContract.cast_arrow_batch`, on the destination write and the ADBC source read. API, file and stdout destinations write the batch's values without casting them to the endpoint schema, so no matrix check runs there.
+- Known exception: the transform encodes a struct or list column for a `Json` target with `json.dumps`, a conversion the matrix lists as forbidden.
+- Known exception: `resolve_arrow_type` names the structural families `Object` and `List` and their sub-schema keys itself, not from the table, so a new structural family also needs an edit there.
 - **How we would know this was wrong:** a consumer re-declaring family names or conversion rules by hand, or the transform and the destination cast disagreeing on one conversion.
 - Revisit if: a non-Arrow runtime has to execute these types, or the contract must define types the engine cannot build.

@@ -20,7 +20,8 @@ affects:
   - type: path
     pattern: "proto/analitiq/v1/**"
 provenance:
-  authoredBy: human
+  authoredBy: agent
+  ratifiedBy: "@Analitiq-Bot-Wonka"
   sourceArtifact: docs/architecture/grpc-streaming-architecture.md
 ---
 
@@ -62,7 +63,7 @@ Pro: buffering and replay. Con: a new piece of infrastructure, and ack-per-batch
 
 ## Trade-offs
 
-Both containers must mount the same config and resolve the same `PIPELINE_ID`, and the destination repeats config loading and validation. A mismatch between the two config copies is not detected by the handshake. Every destination language needs an Arrow IPC implementation, and a batch is bounded by the single gRPC message cap (`GRPC_MAX_MESSAGE_SIZE`). `write_mode` reaches the destination twice: on the handshake, and from its own config, where it scopes which transports the worker receives.
+Both containers must mount the same config and resolve the same `PIPELINE_ID`, and the destination repeats config loading and validation. A mismatch between the two config copies is not detected by the handshake. Every destination language needs an Arrow IPC implementation and its own loader for the pipeline config, which exists only as the Python `PipelineConfigPrep`, and a batch is bounded by the single gRPC message cap (`GRPC_MAX_MESSAGE_SIZE`). `write_mode` reaches the destination twice: on the handshake, and from its own config, where it scopes which transports the worker receives.
 
 ## Consequences
 

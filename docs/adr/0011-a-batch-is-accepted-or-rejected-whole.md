@@ -20,7 +20,8 @@ affects:
   - type: path
     pattern: "cdk/cdk/base_handler.py"
 provenance:
-  authoredBy: human
+  authoredBy: agent
+  ratifiedBy: "@Analitiq-Bot-Wonka"
   sourceArtifact: docs/architecture/grpc-streaming-architecture.md
 ---
 
@@ -41,8 +42,8 @@ partial cursor advance and partial rollback in every handler.
 
 We make the batch the unit of acceptance and rejection. `AckStatus` has no
 partial value. The ack's
-`failed_record_ids` is diagnostic only: the engine disposes of the whole
-batch regardless of it. A validation rule that fails on any row of a
+`failed_record_ids` is carried but never read: the engine disposes of the
+whole batch regardless of it. A validation rule that fails on any row of a
 batch with no mapping defect fails the whole batch with a
 `ValidationFailure` carrying `ErrorStrategy.strictest` of the failed rules
 (fail over dlq over skip), and `BatchPolicy.reject` disposes of the batch

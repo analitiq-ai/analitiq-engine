@@ -20,7 +20,8 @@ affects:
   - type: path
     pattern: "cdk/cdk/**"
 provenance:
-  authoredBy: human
+  authoredBy: agent
+  ratifiedBy: "@Analitiq-Bot-Wonka"
   sourceArtifact: docs/architecture/grpc-streaming-architecture.md
 ---
 
@@ -28,11 +29,14 @@ provenance:
 
 ## Context
 
-Each batch carries the cursor that, once the batch commits, becomes the
-stream's checkpoint. Cursor shape depends on the source: a timestamp with
-a tie-breaker, an LSN, a composite key. If destinations read cursors, every
-destination handler would have to understand every source's cursor
-typing, and a change to the cursor format would touch every connector.
+A batch of an incremental stream carries a cursor, the batch's highest
+non-null cursor value. The engine checkpoints from the cursor a `SUCCESS`
+ack echoes back.
+Cursor shape depends on the source: the cursor column's type (a
+timestamp, an integer, a decimal) and any tie-breaker fields. If
+destinations read cursors, every destination handler would have to
+understand every source's cursor typing, and a change to the cursor
+format would touch every connector.
 
 ## Decision
 
@@ -40,8 +44,12 @@ We keep the cursor format engine-owned and opaque on the wire: `Cursor` is
 a single `bytes token` whose format the engine's cursor module owns
 (`encode_cursor`, `decode_cursor`, `compute_max_cursor`,
 `cursor_to_state_dict`). The destination receives the token with the batch
-and returns it unread as `committed_cursor` on a `SUCCESS` ack; the engine
-persists it. Replay safety is keyed on row identity, not the cursor
+and returns it unread as `committed_cursor` on a `SUCCESS` ack. The engine
+decodes the echoed token with `cursor_to_state_dict` and
+`StateManager.save_stream_checkpoint` persists the decoded primary
+watermark value to the stream's `CursorStore` file; the state log line
+carries the decoded cursor state, tie-breakers included, as hex-encoded
+JSON. Replay safety is keyed on row identity, not the cursor
 ([ADR 0014](0014-writes-are-idempotent-on-content-derived-identity-never-batch-position.md)).
 
 ## Options considered
@@ -59,10 +67,15 @@ persists it. Replay safety is keyed on row identity, not the cursor
 ## Trade-offs
 
 The destination can verify nothing about the cursor it echoes. The engine
-persists the echoed bytes only as
+persists the watermark decoded from the echoed token only as
 [ADR 0013](0013-prefer-duplicates-over-data-loss.md) allows, and trusts the
-destination to echo the token it was sent. All cursor semantics, including comparison across
-batches, live in one engine module.
+destination to echo the token it was sent. The token format and the
+per-batch maximum live in one engine module; the engine does not compare
+cursors across batches, so each committed watermark overwrites the last.
+
+Known exceptions in code:
+- Tie-breakers ride the token but not the checkpoint: `CursorStore` keeps
+  the primary value alone, so a resumed read bounds on that value only.
 
 ## Consequences
 

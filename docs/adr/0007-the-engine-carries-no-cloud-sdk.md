@@ -18,7 +18,8 @@ affects:
   - type: path
     pattern: "cdk/cdk/secrets/resolvers/scheme.py"
 provenance:
-  authoredBy: human
+  authoredBy: agent
+  ratifiedBy: "@Analitiq-Bot-Wonka"
   sourceArtifact: docs/architecture/engine-architecture.md
 ---
 
@@ -54,7 +55,7 @@ Pro: no bundle change. Con: one variable for all streams grows with the stream c
 
 ## Trade-offs
 
-The engine cannot verify that its state was harvested; a deployment that drops the `ANALITIQ_STATE` lines or forgets to repackage the files makes the next run do a full re-scan, which costs time but not data. Observability depends on an external log shipper parsing stdout markers, so those marker formats are a contract with the deployment. The `s3` extra is a bounded leak of cloud code into the public repo, accepted to support one secret scheme.
+The engine cannot verify that its state was harvested; a deployment that drops the `ANALITIQ_STATE` lines or forgets to repackage the files makes the next run do a full re-scan, which costs time but not data. A checkpoint file that cannot be written is logged as a warning and does not fail the load; its `ANALITIQ_STATE` line has already been emitted. Observability depends on an external log shipper parsing stdout markers, so those marker formats are a contract with the deployment. The `s3` extra is a bounded leak of cloud code into the public repo, accepted to support one secret scheme.
 
 ## Consequences
 

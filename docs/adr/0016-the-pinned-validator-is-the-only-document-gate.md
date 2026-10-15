@@ -20,7 +20,8 @@ affects:
   - type: path
     pattern: "tools/contract_consumption.py"
 provenance:
-  authoredBy: human
+  authoredBy: agent
+  ratifiedBy: "@Analitiq-Bot-Wonka"
   sourceArtifact: docs/architecture/engine-architecture.md
 ---
 
@@ -62,5 +63,7 @@ The engine pins `analitiq-contract-models` and `analitiq-validator` exactly, and
 - Harder: an engine that lags a contract release that changes the mapping vocabulary does not start, even for pipelines that use none of the change.
 - Known exception: before the gate, the manifest, the pipeline document and the connection documents are read as plain JSON, only to find which packages the request holds. The validator still grades them in the same request, but the census does not see those reads.
 - Known exception: the worker bootstrap re-reads each `type-map.json` from disk with `read_raw_type_map` instead of shipping the graded text, and type maps are parsed into rules by `parse_type_map`, not held as contract models.
+- Known exception: some blocks are still read as the JSON their author wrote, not field by field through the model: transport blocks, predicates, value expressions, endpoint columns, assignment targets, the declared SQL capabilities, error map and concurrency, and the whole connector as the resolver's `connector` scope. The census lists these as opaque, with the one module that reads each, and cannot list the fields read from them.
+- Known exception: the import check covers expression forms and function names only. Validation rule types are not checked at import; a rule type the mapping compiler does not handle fails when a batch reaches it.
 - **How we would know this was wrong:** documents the validator passes that the engine then rejects or misreads at run time, or engine-side checks reappearing to close gaps in the validator.
 - Revisit if: the validator can no longer run in-process at the engine's pinned version, or the contract stops shipping Pydantic models.

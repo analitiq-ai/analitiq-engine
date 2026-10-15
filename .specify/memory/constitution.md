@@ -218,4 +218,4 @@ rounds, then the required status checks. Owned by `CONTRIBUTING.md` (CI; Merge R
 - Compliance: `/speckit-plan` evaluates every gate in its Constitution Check; a violation MUST be
   justified in the plan's Complexity Tracking table or the plan changes.
 
-**Version**: 1.0.3 | **Ratified**: 2026-09-24 | **Last Amended**: 2026-10-05
+**Version**: 1.0.4 | **Ratified**: 2026-09-24 | **Last Amended**: 2026-10-14

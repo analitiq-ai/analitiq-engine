@@ -14,7 +14,8 @@ affects:
   - type: path
     pattern: "cdk/cdk/conformance/**"
 provenance:
-  authoredBy: human
+  authoredBy: agent
+  ratifiedBy: "@Analitiq-Bot-Wonka"
   sourceArtifact: docs/testing/conformance-kit.md
 ---
 
@@ -48,11 +49,13 @@ We ship the acceptance suite in the CDK as `cdk.conformance`, installed with the
 
 ## Trade-offs
 
-Warehouse write regressions and API provider-side behaviour are never live-certified by the kit; they surface only in end-to-end runs. Tier 1 has to go deep enough on the read path to carry api connectors alone. The kit resolves the connector class through the same `KIND_DEFAULTS` table the engine registry seeds ([ADR 0019](0019-resolve-a-connector-by-kind-then-connector-id-with-a-generic-class-per-kind.md)), so what it audits is what production loads.
+Warehouse write regressions and API provider-side behaviour are never live-certified by the kit; they surface only in end-to-end runs. Tier 1 has to go deep enough on the read path to carry api connectors alone. The kit resolves the connector class through the same `KIND_DEFAULTS` table the engine registry seeds ([ADR 0019](0019-resolve-a-connector-by-kind-then-connector-id-with-a-generic-class-per-kind.md)), so for a package that registers one class in both groups, or none, what it audits is what production loads.
 
 Known exceptions in code:
 - Tier 2 applies only to `kind: database` (`APPLIES_TO_KINDS`). Kinds with no tier-1 checks (`file`, `s3`, `stdout`) fail the kind-applicability gate, so "mandatory tier 1" means a red job for them until checks exist.
 - Which database systems run tier 1 only is set by each connector repo's CI wiring: without a live connection, the live checks skip.
+- A database connector that ships no write type map skips every live tier-2 check, the resume read included, because the live harness needs the write role, so its tier-2 run never touches the system.
+- The kit can audit a different class from the one production loads: when a package registers its class in one entry-point group only (production serves the other role with the generic class), and when the run names a class with `--connector-class`, which bypasses the entry points.
 
 ## Consequences
 

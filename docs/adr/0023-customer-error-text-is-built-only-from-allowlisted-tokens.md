@@ -16,7 +16,8 @@ affects:
   - type: path
     pattern: "src/state/metrics_storage.py"
 provenance:
-  authoredBy: human
+  authoredBy: agent
+  ratifiedBy: "@Analitiq-Bot-Wonka"
   sourceArtifact: docs/architecture/engine-architecture.md
 ---
 
@@ -33,14 +34,14 @@ We build `error_message` and `error_detail` from fixed engine strings, stage and
 - `error_message` is `customer_message(code)`: one fixed message per `ErrorCode`.
 - `error_detail` is `build_error_detail(exc)`: per member of the exception chain, a `stage/CODE:ExceptionType` token from the `FailureTag` stamped by `tag_failure`, or the bare class name (`type(member).__name__`) when untagged. It is capped in length and is internal-only; the control plane must not forward it.
 - The pipeline-level record (runner) and the stream-level record (stream processor) both classify a terminating exception with `classify_for_metrics`, which returns `(error_code, error_message, error_detail)`.
-- The full message goes to the engine logs (`logger.exception`), never into the record.
+- The full message and traceback go to the engine logs, never into the record.
 
 Known exception: a partial run with no terminating exception builds `error_detail` with `detail_for_code`, which appends a fixed, developer-authored reason phrase (for example "records dead-lettered after retries") to the stage and code. The phrase is engine text, never connector or driver text.
 
 ## Options considered
 
 ### Option A: Allowlisted tokens only (chosen)
-Pro: no free text enters either field, so no secret can. Con: the record cannot say more than stage, code and exception class.
+Pro: no message text enters either field, so no secret can. Con: the record cannot say more than stage, code and exception class.
 
 ### Option B: Forward `str(exception)`
 Pro: maximum diagnostic detail. Con: leaks whatever the connector or driver put in the message, credentials included.
@@ -54,7 +55,7 @@ Debugging a failed run needs the engine logs; the record says where and in what 
 
 ## Consequences
 
-- Easier: adding a connector or driver never needs a new redaction rule; reviewing a leak means reading one table of fixed strings and one token builder.
+- Easier: adding a connector or driver never needs a new redaction rule; reviewing a leak means reading one table of fixed strings, one token builder and the reason phrases passed to `detail_for_code`.
 - Harder: support cannot diagnose from the run status alone; any richer customer message must be a new fixed per-code string or a new code.
 - **How we would know this was wrong:** operators routinely cannot act on `error_detail` and pull logs for most failures, or customers repeatedly ask for detail the fixed messages cannot give.
 - Revisit if: the engine gains a structured, engine-validated failure field (for example a declared error_map entry name, see [ADR 0022](0022-connectors-declare-driver-failures-as-facts.md)) that could be added to the token set without admitting free text.

@@ -16,7 +16,8 @@ affects:
   - type: path
     pattern: "src/worker/**"
 provenance:
-  authoredBy: human
+  authoredBy: agent
+  ratifiedBy: "@Analitiq-Bot-Wonka"
   sourceArtifact: docs/architecture/connector-module-architecture.md
 ---
 
@@ -53,7 +54,7 @@ We resolve a connector in `cdk.registry.ConnectorRegistry.resolve`: a class an i
 Log-and-skip discovery means a broken package surfaces as a fallback to the generic class or a `ConnectorNotRegisteredError` at resolve, not as a startup failure. The roles in `KIND_DEFAULTS` are declared, the one place a capability is stated rather than derived ([ADR 0004](0004-capability-is-derived-never-declared.md)); the first-load check is what keeps it honest.
 
 Known exceptions in code:
-- The registry does not stop an entry point adding a kind: `resolve` matches `connector_id` whatever the kind, and the runner passes a kind outside `KIND_DEFAULTS` through with a warning. The bound is the contract's closed kind enum.
+- The registry does not stop an entry point adding a kind: `resolve` matches `connector_id` whatever the kind, and the runner passes a source kind outside `KIND_DEFAULTS` through with a warning (a destination kind, with none). The bound is the contract's closed kind enum.
 - The conformance kit checks that surface for `kind: database` only; the registry loads any class.
 
 ## Consequences

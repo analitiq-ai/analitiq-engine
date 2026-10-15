@@ -223,8 +223,9 @@ To refuse a batch, raise `BatchRejected` with the reason and, when the
 sink knows it, a `FailureCategory`; it is fatal and destination-owned by
 default, and a sink that means something else says so. A sink that lands
 rows one request at a time may also pass `records_written` and
-`failed_record_ids`; they are diagnostic, and the engine disposes of the
-whole batch ([ADR 0011](../adr/0011-a-batch-is-accepted-or-rejected-whole.md)).
+`failed_record_ids`; the engine does not read `failed_record_ids` and
+disposes of the whole batch
+([ADR 0011](../adr/0011-a-batch-is-accepted-or-rejected-whole.md)).
 An `OSError` needs no per-sink handling: one errno table judges every sink
 that writes through a file descriptor, identically for files and stdout.
 

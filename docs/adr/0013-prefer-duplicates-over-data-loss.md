@@ -18,7 +18,8 @@ affects:
   - type: path
     pattern: "src/state/**"
 provenance:
-  authoredBy: human
+  authoredBy: agent
+  ratifiedBy: "@Analitiq-Bot-Wonka"
   sourceArtifact: docs/architecture/grpc-streaming-architecture.md
 ---
 
@@ -40,7 +41,7 @@ We take the duplicate every time:
 ## Options considered
 
 ### Option A: At-least-once everywhere, verdict reported (chosen)
-- Pro: no row is lost to a missing ack, an early checkpoint, or a non-unique cursor. Kafka Connect (without idempotence), Airbyte and Singer make the same trade.
+- Pro: no row is lost to a missing ack, an early checkpoint, or a non-unique cursor, except in the cases under Known exceptions. Kafka Connect (without idempotence), Airbyte and Singer make the same trade.
 - Con: at-least-once sinks can duplicate, so the operator has to know which streams those are.
 
 ### Option B: Gate the retry on the stream's declared semantics
@@ -54,6 +55,11 @@ We take the duplicate every time:
 ## Trade-offs
 
 Every destination must tolerate re-delivery. Sinks without content identity (see [ADR 0014](0014-writes-are-idempotent-on-content-derived-identity-never-batch-position.md)) duplicate on a resend, and the guarantee the operator gets is a log line and an ack field, not a refusal.
+
+Known exceptions in code:
+
+- Under the `dlq` or `skip` error strategy, a batch whose retries run out, including retries of a send that reached no ack, is dropped and the stream goes on; the next committed batch's cursor then moves the checkpoint past it. `dlq` keeps the rows in the dead-letter queue; `skip` does not. The exception is a `truncate_insert` stream's first batch, whose failure fails the stream.
+- An incremental SQL read pages with `LIMIT`/`OFFSET`, ordered by the cursor column alone. Rows tied on the cursor value across a page boundary can be skipped, and later pages then move the checkpoint past them.
 
 ## Consequences
 

@@ -20,7 +20,8 @@ affects:
   - type: path
     pattern: "cdk/cdk/conformance/target.py"
 provenance:
-  authoredBy: human
+  authoredBy: agent
+  ratifiedBy: "@Analitiq-Bot-Wonka"
   sourceArtifact: docs/config/destination-config.md
 ---
 
@@ -32,12 +33,12 @@ The engine keeps one registry per role, and a package registers under one entry-
 
 ## Decision
 
-We give each connector family one CDK class that serves both roles: `GenericSQLConnector` for databases over both transports, `GenericAPIConnector` for APIs, each listed in `KIND_DEFAULTS` with roles `("source", "destination")`. What differs between reading and writing an API is declared in the endpoint document's `operations` block (`operations.read`, `operations.write.<mode>`) and run by role methods on the one class. A connector package registers the same class in both entry-point groups, and the conformance kit refuses at load a package that registers a different class per group.
+We give each connector family one CDK class that serves both roles: `GenericSQLConnector` for databases over both transports, `GenericAPIConnector` for APIs, each listed in `KIND_DEFAULTS` with roles `("source", "destination")`. What differs between reading and writing an API is declared in the endpoint document's `operations` block (`operations.read`, `operations.write.<mode>`) and run by role methods on the one class. A connector package registers the same class in both entry-point groups, and the conformance kit refuses at load a package whose two groups name different classes.
 
 ## Options considered
 
 ### Option A: one class per family, both roles (chosen)
-- Pro: connect, auth, status classification and paging are written once, so read and write cannot disagree on them.
+- Pro: auth and request binding are written once, so read and write cannot disagree on them.
 - Con: one larger class that must satisfy both Protocols.
 
 ### Option B: separate source and destination classes per family (Airbyte/Singer style)
@@ -49,12 +50,14 @@ We give each connector family one CDK class that serves both roles: `GenericSQLC
 A change to a shared mechanism reaches both directions at once, for good or ill. Direction-specific behaviour has to be expressible as endpoint-document data or as role methods on the one class.
 
 Known exceptions in code:
-- The engine registry does not refuse a split: `build_registries` fills two registries from two groups and would resolve different classes per role. The rule is enforced only by the conformance kit's target loading.
+- The engine registry does not refuse a split: `build_registries` fills two registries from two groups and would resolve different classes per role. Only the conformance kit's target loading checks the rule, and only when both groups name a class.
+- A package that registers its class in one group only passes the kit, which audits that class; production resolves the `KIND_DEFAULTS` generic class for the other role. A run given `--connector-class` reads no entry points at all.
+- `GenericSQLConnector` opens its connection on two paths, `connect` for writes and inline in `read_batches` for reads, so the same connect failure surfaces as `ConnectionError` on one and `ReadError` on the other.
 - Kinds whose generic class serves one role (`file`, `s3`, `stdout` are destination-only) have one class for that role; the rule binds families that serve both.
 
 ## Consequences
 
-- Easier: a fix to status handling or paging lands in both directions in one change.
+- Easier: a fix to auth or request binding lands in both directions in one change.
 - Harder: a system whose read and write genuinely need different code must hold both in one class and one dialect.
 - **How we would know this was wrong:** role branches accumulating inside the generic classes for behaviour the endpoint document cannot express.
 - Revisit if: a family appears whose read and write share no transport or classification logic.
