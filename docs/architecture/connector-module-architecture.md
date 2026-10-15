@@ -275,10 +275,9 @@ so two ways — and the plugin picks based on how well-behaved the database is:
 Both run on an unchanged CDK (see
 [ADR 0003](../adr/0003-the-cdk-is-a-toolbox-not-a-gatekeeper.md)).
 
-> **The one real boundary.** Engineers are needed only for a **new transport
-> family** (a connection style that is neither SQLAlchemy, ADBC, nor HTTP) or a
-> breaking contract change. A new *database* that fits an existing transport
-> family needs no CDK work.
+> **Where CDK work is needed:** a **new transport family** (a connection style
+> that is neither SQLAlchemy, ADBC, nor HTTP), a SQL shape the
+> `sql_capabilities` values do not name, or a breaking contract change.
 
 ### Capability
 
@@ -427,9 +426,9 @@ Installing a connector package attaches it through Python entry points (see
    how the entry-point group sets a connector's role follows
    [ADR 0004](../adr/0004-capability-is-derived-never-declared.md).
 
-3. **Discover rides the same install.** The registered connector's
-   `Discoverable` methods serve `list_schemas` / `list_tables` /
-   `list_columns` locally (see
+3. **Discover rides the same install.** A registered connector that
+   implements `Discoverable` serves `list_schemas` / `list_tables` /
+   `list_columns` from that install (see
    [ADR 0003](../adr/0003-the-cdk-is-a-toolbox-not-a-gatekeeper.md)).
 
 ## 7. Anti-monolith principles (the rules underneath)
@@ -451,4 +450,4 @@ Installing a connector package attaches it through Python entry points (see
 
 Ownership and distribution of the CDK and connector code follow
 [ADR 0003](../adr/0003-the-cdk-is-a-toolbox-not-a-gatekeeper.md). The CDK
-is published to PyPI as `analitiq-cdk`, one release per `cdk-v*` tag.
+is published to PyPI as `analitiq-cdk` from `cdk-v*` tags.

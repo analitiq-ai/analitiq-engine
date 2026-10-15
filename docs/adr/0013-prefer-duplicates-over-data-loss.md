@@ -36,7 +36,7 @@ We take the duplicate every time:
 - A send that reaches no ack is `ACK_STATUS_RETRYABLE_FAILURE`, decided once, in the gRPC client where the condition is detected. Retries stay bounded by `max_retries`.
 - The checkpoint never records a cursor the destination has not acked as committed. `Committed` is the only `Disposition` with a cursor; `AlreadyCommitted` carries none. `StateManager.save_cursor` holds the source's pre-ack position in memory only; `save_stream_checkpoint`, run on the ack, is what persists. An ack pairing a cursor with a non-success status is a fatal connector contract violation.
 - Incremental SQL reads resume inclusively (`>=`) from that cursor, re-reading the boundary row; incremental API reads move the lower bound back from it by the stream's safety window.
-- Each stream's retry-safety verdict (`RetryVerdict`: exactly-once or at-least-once, with a reason) is reported in the schema ack and logged at stream start. It never gates a retry: `BatchPolicy` takes no semantics argument.
+- Each stream's retry-safety verdict (`RetryVerdict`: exactly-once or at-least-once, with a reason) is reported in the schema ack and logged at INFO at stream start. It never gates a retry: `BatchPolicy` takes no semantics argument.
 
 ## Options considered
 
@@ -54,12 +54,13 @@ We take the duplicate every time:
 
 ## Trade-offs
 
-Every destination must tolerate re-delivery. Sinks without content identity (see [ADR 0014](0014-writes-are-idempotent-on-content-derived-identity-never-batch-position.md)) duplicate on a resend, and the guarantee the operator gets is a log line and an ack field, not a refusal.
+Every destination must tolerate re-delivery. Sinks without content identity (see [ADR 0014](0014-writes-are-idempotent-on-content-derived-identity-never-batch-position.md)) can duplicate on a resend, and what the operator gets is the ack field and an INFO log line, not a refusal.
 
 Known exceptions in code:
 
-- Under the `dlq` or `skip` error strategy, a batch whose retries run out, including retries of a send that reached no ack, is dropped and the stream goes on; the next committed batch's cursor then moves the checkpoint past it. `dlq` keeps the rows in the dead-letter queue; `skip` does not. The exception is a `truncate_insert` stream's first batch, whose failure fails the stream.
+- Under the `dlq` or `skip` error strategy, a batch whose retries run out, including retries of a send that reached no ack, is dropped and the stream goes on; the next committed batch's cursor then moves the checkpoint past it. `dlq` writes the rows to the dead-letter queue, and a row whose write fails is logged as lost; `skip` keeps nothing. The exception is a `truncate_insert` stream's first batch, whose failure fails the stream.
 - An incremental SQL read pages with `LIMIT`/`OFFSET`, ordered by the cursor column alone. Rows tied on the cursor value across a page boundary can be skipped, and later pages then move the checkpoint past them.
+- An incremental API read's lower bound derives from the committed cursor and `safety_window_seconds`. A row below that bound in a batch that never committed (the provider returned rows out of cursor order) is not read again; with a window of 0 and an exclusive `gt` lower bound on a `date-time` or id cursor, neither is a row that later arrives at the cursor value.
 
 ## Consequences
 

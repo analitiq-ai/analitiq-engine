@@ -51,8 +51,9 @@ keep the rule.
 ## Options considered
 
 ### Option A: One batch in flight, strictly ordered (chosen)
-- Pro: checkpoints are written in commit order, one commit at a time; the
-  engine never has more than one unacked batch outstanding on a stream.
+- Pro: checkpoints are written in ack order, one ack at a time; the
+  engine sends a stream's next batch only after the previous one's ack, or
+  after giving up on it.
 - Con: per-batch round-trip latency limits throughput.
 
 ### Option B: Pipelined or windowed sends, several batches in flight
@@ -75,8 +76,10 @@ batches belongs in the engine ([ADR 0006](0006-batch-coalescing-is-engine-side.m
 rather than in deferred acks.
 
 Known exceptions in code:
-- The engine does not coalesce. A batch goes on the wire as the source
-  read yields it.
+- The engine does not coalesce.
+- On an ACK timeout the client tears the stream down and the retry goes
+  out on a new one. The destination may still be writing the attempt the
+  engine gave up on, so two attempts of one batch can overlap there.
 
 ## Consequences
 

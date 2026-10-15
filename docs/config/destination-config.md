@@ -44,8 +44,8 @@ The destination service loads its connection from the pipeline's
 +----------------------+        +----------------------+
 ```
 
-Every connector family lives in the CDK, alongside the shared building
-blocks, and runs in an isolated worker (see
+The CDK's connector families live alongside its shared building blocks,
+and at run time a connector runs in a worker subprocess (see
 [ADR 0008](../adr/0008-connector-code-runs-only-in-an-isolated-worker.md)).
 The module breakdown is part of
 [`engine-architecture.md`](../architecture/engine-architecture.md#module-layout)'s
@@ -70,8 +70,9 @@ Both registries — source and destination — are built by
 A connector resolves to the class an installed package registered under
 its `connector_id`, else to its kind's generic class in `cdk.registry.KIND_DEFAULTS` (see
 [ADR 0019](../adr/0019-resolve-a-connector-by-kind-then-connector-id-with-a-generic-class-per-kind.md)).
-`database` and `api` serve both roles; `file`, `s3` and `stdout` serve
-destination only — a `kind: file` *source* raises
+The `database` and `api` generic classes serve both roles; the `file`,
+`s3` and `stdout` ones serve destination only, so a `kind: file` *source*
+whose `connector_id` no installed package registers as a source raises
 `ConnectorNotRegisteredError` rather than resolving a class with no read
 path.
 
@@ -122,10 +123,11 @@ extra (`pip install "analitiq-cdk[arrow]"`).
 
 ## Idempotency
 
-Every write mode has a retry-safety verdict (see
-[ADR 0013](../adr/0013-prefer-duplicates-over-data-loss.md)),
-reported per stream in the schema ack (`retry_semantics` + reason). Each
-sink dedups on content-derived identity (see
+Each handler reports a retry-safety verdict per stream in an accepted
+schema ack (`retry_semantics` + reason; see
+[ADR 0013](../adr/0013-prefer-duplicates-over-data-loss.md)).
+`truncate_insert`'s append phase, API `insert` without an `idempotency`
+block, file sinks across a restart, and stdout do not dedup (see
 [ADR 0014](../adr/0014-writes-are-idempotent-on-content-derived-identity-never-batch-position.md)).
 
 ### Database (row identity)
@@ -164,7 +166,8 @@ restart, drops are not: reported as at-least-once.
 An API `upsert` is idempotent through the endpoint's own `conflict_keys`.
 With a declared `idempotency` block the engine sends a per-record key (see
 [ADR 0014](../adr/0014-writes-are-idempotent-on-content-derived-identity-never-batch-position.md));
-`insert` is then exactly-once **within the provider's replay window**.
+`insert` then reports exactly-once, which holds only if the provider
+dedups on that key, and only **within its replay window**.
 `configure_schema` refuses a header key name that collides with a header
 the connection's transport resolved, and, when the key goes in the body
 (`in: body`), a write refuses a resolved request body that is not a JSON
@@ -183,7 +186,7 @@ batch prints again — there is no sink state for a replay to dedup against.
 | `run_id` / `stream_id` | Routing/scoping identifiers |
 | `batch_seq` | Per-stream batch sequence; restarts at 1 each time the engine (re)starts the read |
 | `cursor` | Opaque token produced by the engine, stored verbatim by the destination |
-| `record_ids` | Content-derived row identities (SHA-256), used as an API endpoint's insert-mode idempotency key. The SQL `_record_hash` is computed separately, from the cast row |
+| `record_ids` | Content-derived row identities (SHA-256), used as the idempotency key of an API insert-mode endpoint that declares one. The SQL `_record_hash` is computed separately, from the cast row |
 
 Full wire-protocol semantics are in
 [`grpc-streaming-architecture.md`](../architecture/grpc-streaming-architecture.md).

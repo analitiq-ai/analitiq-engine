@@ -80,9 +80,10 @@ space before landing:
 
 Landing into the stage is executemany `INSERT` by default. A connector whose
 system has its own bulk protocol, other than `adbc_ingest`, declares it
-(§5) and implements the `bulk_land` dialect hook (§4) ([ADR 0005](../adr/0005-stage-then-merge-is-the-single-sql-write-primitive.md)); the CDK then uses it. Stage contents
-and the downstream mode statement are identical either way, and a declined
-bulk land falls back to executemany with an INFO-level log. `adbc_ingest` is
+(§5) and implements the `bulk_land` dialect hook (§4) ([ADR 0005](../adr/0005-stage-then-merge-is-the-single-sql-write-primitive.md)); the CDK then uses it. The downstream mode
+statement is the same either way. At run time the cycle checks only the
+stage's row count after connector bulk code ran. A declined bulk land falls back
+to executemany with an INFO-level log. `adbc_ingest` is
 that backend's declared bulk mechanism, and a system's own protocol —
 `LOAD DATA LOCAL INFILE`, `COPY`, a load-job API — lands here too.
 
@@ -591,7 +592,8 @@ Mechanics:
 
 ## 9. Idempotency and retry verdicts
 
-Idempotency keys on content-derived row identity ([ADR 0014](../adr/0014-writes-are-idempotent-on-content-derived-identity-never-batch-position.md)):
+`upsert` and `insert` dedup on row identity, never batch position;
+`truncate_insert` does not dedup ([ADR 0014](../adr/0014-writes-are-idempotent-on-content-derived-identity-never-batch-position.md)):
 
 | Mode | Verdict | Mechanism |
 |------|---------|-----------|

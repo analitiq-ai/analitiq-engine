@@ -33,12 +33,12 @@ Pipeline, stream, connection, connector, endpoint and type-map documents are aut
 
 ## Decision
 
-We refuse every run unless the pinned `analitiq-validator` passes the run's whole workspace: `read_run_workspace` collects the manifest and the packages of the pipeline, the connections it names and their connectors, and `gate_run` calls `validate_workspace` on that one request and raises `WorkspaceRejectedError` on a failed verdict. Config loading builds the engine's typed `analitiq.contracts` models from the texts that verdict graded. Past the gate, the engine reads pipeline, stream, connection, connector and endpoint documents through their contract models, not as dicts, so `tools/contract_consumption.py` can list the contract fields it reads from them. The mapping compiler checks at import that its expression compilers and function kernels match the contract's expression forms and function names exactly, so a contract release that adds or removes one fails engine startup.
+We refuse every run unless the pinned `analitiq-validator` passes the run's workspace request: `read_run_workspace` collects the manifest and the packages of the pipeline, the connections it names and their connectors, and `gate_run` calls `validate_workspace` on that one request and raises `WorkspaceRejectedError` on a failed verdict. Config loading builds the engine's typed `analitiq.contracts` models from the texts that verdict graded. The mapping compiler checks at import that its expression compilers and function kernels match the contract's expression forms and function names exactly, so a contract release that adds or removes one fails engine startup.
 
 ## Options considered
 
 ### Option A: The pinned validator is the one gate; typed models from the graded texts (chosen)
-- Pro: what runs is exactly what was graded; static rules live in one place; field use can be checked statically.
+- Pro: the engine builds its models from the texts that were graded; static rules live in one place; field use can be checked statically.
 - Con: the engine cannot run without a matching validator and contract-models release.
 
 ### Option B: Engine-side validation (Pydantic or JSON Schema) in addition to the validator
@@ -55,7 +55,7 @@ We refuse every run unless the pinned `analitiq-validator` passes the run's whol
 
 ## Trade-offs
 
-The engine pins `analitiq-contract-models` and `analitiq-validator` exactly, and every contract change reaches the engine as a deliberate pin bump. The CDK depends on `analitiq-contract-models` as a range within one major. Building a model still runs Pydantic parsing, which rejects a document whose shape the model refuses. This is a side effect of building the model, not a second gate. Reads the type map cannot see (a `getattr` over a table, a path walk) have to be registered by hand in the census.
+The engine pins `analitiq-contract-models` and `analitiq-validator` exactly, and every contract change reaches the engine as a deliberate pin bump. The CDK depends on `analitiq-contract-models` as a range within one major. Building a model still runs Pydantic parsing, which rejects a document whose shape the model refuses. This is a side effect of building the model, not a second gate. Reads mypy's type map cannot see (a `getattr` over a table, a path walk) have to be registered by hand in the census.
 
 ## Consequences
 

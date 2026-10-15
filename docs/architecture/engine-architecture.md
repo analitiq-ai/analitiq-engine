@@ -88,21 +88,24 @@ src/
 └── main.py                  # Dual-mode entrypoint (RUN_MODE = source | destination)
 ```
 
-State and the DLQ are written to the local filesystem; logs, metrics, and
-state lines go to stdout (see
-[ADR 0007](../adr/0007-the-engine-carries-no-cloud-sdk.md)).
+State and the DLQ are written to the local filesystem; logs go to stdout (see
+[ADR 0007](../adr/0007-the-engine-carries-no-cloud-sdk.md)). The state,
+metrics and DLQ marker lines are logged at INFO, so a log level above INFO
+(`LOG_LEVEL` or the pipeline's `runtime.logging.log_level`) suppresses them.
 
 ### Incremental state restore
 
 An incremental stream's durable resume cursor advances only when a destination
 ACK commits a batch that carries one. The engine then writes it to the stream's
 own checkpoint file, `state/{pipeline_id}/{stream_id}.json` =
-`{"cursor": <value>}`, and to an `ANALITIQ_STATE` stdout line (see
-[ADR 0007](../adr/0007-the-engine-carries-no-cloud-sdk.md)). After a crash,
+`{"cursor": <value>}`, and logs an `ANALITIQ_STATE` line at INFO (see
+[ADR 0007](../adr/0007-the-engine-carries-no-cloud-sdk.md)). A failed
+checkpoint write does not fail the run; the file keeps its
+previous content. After a crash,
 the next run resumes from the last checkpointed cursor, re-reading the
 boundary as [ADR 0013](../adr/0013-prefer-duplicates-over-data-loss.md)
 records; a `truncate_insert` stream re-reads from the start.
-A stream with no checkpoint resumes with a full re-scan.
+A stream with no readable checkpoint resumes with a full re-scan.
 
 Restore is lazy: `get_cursor` reads a stream's checkpoint file at the start of
 its run (`src/state/store.py:CursorStore`, `src/state/state_manager.py`). The
@@ -235,7 +238,7 @@ Neither carries exception message text (see
 [ADR 0023](../adr/0023-customer-error-text-is-built-only-from-allowlisted-tokens.md)).
 
 The engine stamps a `FailureTag` (a definite `(error_code, stage)`) on the
-exception at the raise site: the extract / transform / load stage boundaries,
+exception at the extract / transform / load stage boundaries,
 the destination handshake, and the config phase. `classify_exception` reads
 those tags (see [ADR 0001](../adr/0001-two-failure-vocabularies.md)). For an
 aggregated `ExceptionGroup` (every stream failed) the highest-priority tag across
@@ -387,7 +390,8 @@ string, its roles, and the extra that importing it needs (see
 is imported on first resolve, where a missing transport fails naming the
 extra to install and the declared roles are checked against `Readable` /
 `Writable`. `file`, `s3` and `stdout` have no source default, so a
-`kind: file` source fails loud.
+`kind: file` source that no installed package registers fails with
+`ConnectorNotRegisteredError`.
 
 `build_registries()` runs inside the spawned worker subprocess (see
 [ADR 0008](../adr/0008-connector-code-runs-only-in-an-isolated-worker.md)).

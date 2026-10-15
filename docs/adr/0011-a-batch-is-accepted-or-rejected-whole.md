@@ -42,17 +42,17 @@ partial cursor advance and partial rollback in every handler.
 
 We make the batch the unit of acceptance and rejection. `AckStatus` has no
 partial value. The ack's
-`failed_record_ids` is carried but never read: the engine disposes of the
-whole batch regardless of it. A validation rule that fails on any row of a
+`failed_record_ids` is carried across both hops, and no disposition reads
+it: the engine disposes of the whole batch regardless of it. A validation rule that fails on any row of a
 batch with no mapping defect fails the whole batch with a
 `ValidationFailure` carrying `ErrorStrategy.strictest` of the failed rules
 (fail over dlq over skip), and `BatchPolicy.reject` disposes of the batch
 under it. A mapping defect raises `TransformationError` instead, whatever
 the rules say. A batch whose
 retries run out is disposed of whole under the stream's strategy, except
-the first batch of a `truncate_insert` stream, which fails the stream. A
+the first batch sent on a `truncate_insert` stream, which fails the stream. A
 `FATAL_FAILURE` ack fails the stream under every strategy; under `dlq` the
-whole batch is written out first. The engine does not split and retry a
+whole batch is passed to the DLQ first. The engine does not split and retry a
 batch to isolate bad rows.
 
 The verdict is whole, but the write is not always atomic. An API
@@ -85,6 +85,11 @@ Rejection granularity equals batch size. An operator who wants finer DLQ
 isolation lowers batch size.
 A batch a validation rule rejects is never retried, because the rule is a
 pure function of the batch.
+
+Known exceptions in code:
+- A DLQ write is per row. A row that neither the DLQ file nor its fallback
+  file takes is logged as lost, and the stream goes on as if the batch
+  were dead-lettered.
 
 ## Consequences
 

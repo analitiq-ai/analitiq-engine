@@ -25,23 +25,23 @@ provenance:
 
 ## Context
 
-A failed run reports why it failed in the `PipelineMetricsRecord` it emits to stdout, and the control plane forwards part of that record to external, API-key customers. The terminating exception is the obvious source of that text, but its message is written by connectors and drivers: untrusted, possibly AI-authored code (see [ADR 0008](0008-connector-code-runs-only-in-an-isolated-worker.md)). That text can embed query fragments, driver internals, or post-expansion connection values such as a password inside a DSN. Before this decision the record carried `str(exception)`, and the next step was a regex scrubber over that text; a scrubber only removes the credential shapes someone thought to list.
+A failed run reports why it failed in the `PipelineMetricsRecord` it logs at INFO as a metrics marker ([ADR 0007](0007-the-engine-carries-no-cloud-sdk.md)), and the control plane forwards part of that record to external, API-key customers. The terminating exception is the obvious source of that text, but its message is written by connectors and drivers: untrusted, possibly AI-authored code (see [ADR 0008](0008-connector-code-runs-only-in-an-isolated-worker.md)). That text can embed query fragments, driver internals, or post-expansion connection values such as a password inside a DSN. Before this decision the record carried `str(exception)`, and the next step was a regex scrubber over that text; a scrubber only removes the credential shapes someone thought to list.
 
 ## Decision
 
-We build `error_message` and `error_detail` from fixed engine strings, stage and code tokens, and exception class names, never from exception message text, so there is no message text to scrub.
+We build `error_message` and `error_detail` from fixed engine strings, stage and code tokens, and exception class names, never from exception message text, so there is no message text to scrub. The allowlist is of token kinds: class names are emitted as they are, not checked against a list.
 
 - `error_message` is `customer_message(code)`: one fixed message per `ErrorCode`.
 - `error_detail` is `build_error_detail(exc)`: per member of the exception chain, a `stage/CODE:ExceptionType` token from the `FailureTag` stamped by `tag_failure`, or the bare class name (`type(member).__name__`) when untagged. It is capped in length and is internal-only; the control plane must not forward it.
 - The pipeline-level record (runner) and the stream-level record (stream processor) both classify a terminating exception with `classify_for_metrics`, which returns `(error_code, error_message, error_detail)`.
-- The full message and traceback go to the engine logs, never into the record.
+- The full message and traceback are logged at ERROR, never put into the record.
 
 Known exception: a partial run with no terminating exception builds `error_detail` with `detail_for_code`, which appends a fixed, developer-authored reason phrase (for example "records dead-lettered after retries") to the stage and code. The phrase is engine text, never connector or driver text.
 
 ## Options considered
 
 ### Option A: Allowlisted tokens only (chosen)
-Pro: no message text enters either field, so no secret can. Con: the record cannot say more than stage, code and exception class.
+Pro: no exception message text enters either field. Con: the record cannot say more than stage, code and exception class.
 
 ### Option B: Forward `str(exception)`
 Pro: maximum diagnostic detail. Con: leaks whatever the connector or driver put in the message, credentials included.
@@ -51,7 +51,7 @@ Pro: keeps most of the diagnostic text. Con: incomplete by nature; a credential 
 
 ## Trade-offs
 
-Debugging a failed run needs the engine logs; the record says where and in what class it failed, not why. Exception class names are developer-chosen identifiers rather than free text, but a connector still picks them, so the guarantee is "no message text", not "no connector-chosen text". Customers get one fixed message per code, so their message is only as precise as the `ErrorCode` set, which is coordinated with the control plane's catalog (see [ADR 0001](0001-two-failure-vocabularies.md)).
+Debugging a failed run needs the engine logs, which hold the exception message and traceback the record leaves out. Class names are emitted verbatim, so the guarantee is "no message text", not "no free-form identifiers": they are the classes of exceptions in the engine process, library classes included. Customers get one fixed message per code, so their message is only as precise as the `ErrorCode` set, which is coordinated with the control plane's catalog (see [ADR 0001](0001-two-failure-vocabularies.md)).
 
 ## Consequences
 

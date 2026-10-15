@@ -122,8 +122,8 @@ The policy is published as `cdk/cdk/type_map/conversion_matrix.json`, generated
 from `ARROW_FAMILIES` by `build_conversion_matrix()` ([ADR 0017](../adr/0017-the-engine-owns-the-arrow-type-vocabulary-and-the-conversion-matrix.md)); for each
 source and target family pair it gives the conversion's mode and the function
 an `explicit` conversion needs. Its top-level `version`
-field is filled from `CONVERSION_MATRIX_VERSION`; the publisher reads that
-field rather than assigning a version. The frontend consumes it as the `@analitiq-ai/conversion-matrix`
+field is filled from `CONVERSION_MATRIX_VERSION`; the versioned-JSON publish
+reads that field rather than assigning a version. The frontend consumes it as the `@analitiq-ai/conversion-matrix`
 npm package (`packages/conversion-matrix/`), which regenerates from that artifact
 on every build and is republished to GitHub Packages whenever the grid changes.
 

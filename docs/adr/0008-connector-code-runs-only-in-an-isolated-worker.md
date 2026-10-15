@@ -43,7 +43,7 @@ We run connector classes only inside a worker subprocess and keep everything sec
 ## Options considered
 
 ### Option A: Worker subprocess, engine-side resolution (chosen)
-Pro: process, memory and crash separation from the engine, resource limits, and secrets resolved engine-side, so a connector receives resolved values and no secret store, and, if it declares transports, only the credentials of its default transport and of those the run's operations name. Con: every read and write crosses a gRPC hop, every transport kind needs a resolver/builder pair, and the worker's filesystem access is not restricted.
+Pro: a separate process, so a connector crash is not the engine's, resource limits, and secrets resolved engine-side, so the bootstrap carries resolved values and no secret store and, for a connector that declares transports, only the credentials of its default transport and of those the run's operations name. Con: every read and write crosses a gRPC hop, every transport kind needs a resolver/builder pair, and the worker's filesystem access is not restricted.
 
 ### Option B: Load connectors in-process in the engine and destination service
 Pro: no IPC, simplest debugging. Con: untrusted code shares memory with the secret store and engine state, and its crash is the engine's crash.
@@ -59,17 +59,18 @@ Pro: any transport can be opened mid-run. Con: a run carries the auth, login and
 
 ## Trade-offs
 
-A worker crash becomes a retryable channel error instead of a stack trace in the engine, which is harder to debug. A transport not named up front cannot be opened mid-run. The bootstrap carries resolved credentials across a local pipe, so it must never be logged, and worker stderr is passed through a DSN redactor. The proxy has to relay capabilities and failure categories across the extra hop.
+A worker crash reaches the engine as a failed call on the worker channel instead of a stack trace in the engine, which is harder to debug. A transport not named up front cannot be opened mid-run. The bootstrap carries resolved credentials across a local pipe, so it must never be logged, and worker stderr is passed through a DSN redactor. The proxy has to relay capabilities and failure categories across the extra hop.
 
 Known exceptions in code:
 
-- The worker is not a filesystem sandbox. `spawn_worker` runs it as the engine's user, in the engine's working directory, with no chroot or mount namespace, so connector code can read whatever the engine can: `connections/` (including `.secrets/` sidecar files and `file:` secrets), `connectors/`, `pipelines/` and `state/`. What it does not get is the engine's environment (so no `env:` secrets), memory or secret resolver.
-- An address-space cap applies only when `WORKER_RLIMIT_AS_MB` is set. By default the limits are no core dumps and at most 1024 open files, with no memory or CPU cap.
+- The worker is not a filesystem sandbox. `spawn_worker` runs it as the engine's user, in the engine's working directory, with no chroot or mount namespace, so connector code can read whatever the engine can: `connections/` (including `.secrets/` sidecar files and `file:` secrets), `connectors/`, `pipelines/` and `state/`.
+- The worker's own environment is the minimal one `spawn_worker` builds, not the engine's. Running as the same user, connector code can still read the environment of the process that spawned it through `/proc` (and with it any `env:` secret) and, where the host's ptrace policy allows, that process's memory.
+- An address-space cap applies only when `WORKER_RLIMIT_AS_MB` is set to a non-zero value. By default the limits are no core dumps and at most 1024 open files, with no memory or CPU cap.
 - For a connector that declares no transports, the bootstrap carries every secret its connection declares (`resolved_config`), not a run-scoped subset.
 
 ## Consequences
 
-- Easier: running AI-authored connectors outside the engine's process, memory and environment; reasoning about which credentials a run exposes, since for a connector with transports it is the default transport plus those the run's operations name.
+- Easier: running AI-authored connectors in a separate process with a clean environment; reasoning about which credentials the bootstrap carries, since for a connector with transports it is the default transport plus those the run's operations name.
 - Harder: anything a connector needs at runtime must be folded into the resolved payload by the trusted side; a new transport kind needs both a resolver and a builder.
 - **How we would know this was wrong:** worker spawn and IPC overhead dominate small runs, or connectors repeatedly need data that cannot be resolved ahead of the run.
 - Revisit if: connectors move to a different sandbox (container or VM per connector) that changes where the boundary sits.

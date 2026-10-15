@@ -29,7 +29,7 @@ Most connectors are declarative config and ship no code; a quirky system ships a
 
 ## Decision
 
-We resolve a connector in `cdk.registry.ConnectorRegistry.resolve`: a class an installed package registered under its `connector_id` wins; otherwise the kind's CDK generic class named in `KIND_DEFAULTS` serves it (the thin path); otherwise resolution raises `ConnectorNotRegisteredError`. Packages register through the `analitiq.source_connectors` / `analitiq.destination_connectors` entry-point groups, keyed by `connector_id` and discovered additively by `build_registries`; a package that fails to load or collides on `connector_id` is logged and skipped. `KIND_DEFAULTS` holds `module:Class` strings with declared roles, imported on first resolve and checked against `Readable` / `Writable` then. Generic classes never branch on `connector_id`; a SQL connector's per-system code goes only in `dialect_class` and `classify_error`, the surface the conformance kit checks, and facts it can declare, such as an `error_map`, go in its `connector.json`.
+We resolve a connector in `cdk.registry.ConnectorRegistry.resolve`: a class an installed package registered under its `connector_id` wins; otherwise the kind's CDK generic class named in `KIND_DEFAULTS` for that role serves it (the thin path); otherwise resolution raises `ConnectorNotRegisteredError`. Packages register through the `analitiq.source_connectors` / `analitiq.destination_connectors` entry-point groups, keyed by `connector_id` and discovered additively by `build_registries`; a package that fails to load or collides on `connector_id` is logged and skipped. `KIND_DEFAULTS` holds `module:Class` strings with declared roles, imported on first resolve and checked against `Readable` / `Writable` then. Generic classes never branch on `connector_id`; a SQL connector's per-system code goes only in `dialect_class` and `classify_error`, the surface the conformance kit checks, and facts it can declare, such as an `error_map`, go in its `connector.json`.
 
 ## Options considered
 
@@ -51,15 +51,14 @@ We resolve a connector in `cdk.registry.ConnectorRegistry.resolve`: a class an i
 
 ## Trade-offs
 
-Log-and-skip discovery means a broken package surfaces as a fallback to the generic class or a `ConnectorNotRegisteredError` at resolve, not as a startup failure. The roles in `KIND_DEFAULTS` are declared, the one place a capability is stated rather than derived ([ADR 0004](0004-capability-is-derived-never-declared.md)); the first-load check is what keeps it honest.
+Log-and-skip discovery means a broken package surfaces as a fallback to the generic class or a `ConnectorNotRegisteredError` at resolve, not as a startup failure. The roles in `KIND_DEFAULTS` are declared rather than derived ([ADR 0004](0004-capability-is-derived-never-declared.md)); `load_kind_default` refuses a declared role the class does not implement, at the first resolve that loads it.
 
 Known exceptions in code:
-- The registry does not stop an entry point adding a kind: `resolve` matches `connector_id` whatever the kind, and the runner passes a source kind outside `KIND_DEFAULTS` through with a warning (a destination kind, with none). The bound is the contract's closed kind enum.
+- The registry does not stop an entry point adding a kind: `resolve` matches `connector_id` whatever the kind, and the runner passes a source kind outside `KIND_DEFAULTS` through with a warning (a destination kind, with none). The bound is the contract's closed kind enum, which also lists `nosql` and `document`, kinds with no `KIND_DEFAULTS` entry.
 - The conformance kit checks that surface for `kind: database` only; the registry loads any class.
 
 ## Consequences
 
-- Easier: adding a connector is installing a package; a declarative connector needs none.
-- Harder: per-system code outside the dialect has no sanctioned home.
+- Harder: a SQL connector's per-system code outside `dialect_class` and `classify_error` has no sanctioned home.
 - **How we would know this was wrong:** generic classes growing `connector_id` checks, or most packages shipping classes that override beyond the dialect.
-- Revisit if: the contract's kind enum opens to kinds the CDK has no generic class for.
+- Revisit if: connectors appear for a contract kind the CDK has no generic class for.

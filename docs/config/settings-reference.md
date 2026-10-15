@@ -134,6 +134,6 @@ input the engine reads.
 
 ## What is deliberately not centralised
 
-Connector- and formatter-owned defaults live in the connector package that
-owns them, or in `cdk/cdk/formatters/` (see
+Connector- and formatter-owned defaults are not engine settings: they live
+in the connector package or in the CDK, such as `cdk/cdk/formatters/` (see
 [ADR 0003](../adr/0003-the-cdk-is-a-toolbox-not-a-gatekeeper.md)).

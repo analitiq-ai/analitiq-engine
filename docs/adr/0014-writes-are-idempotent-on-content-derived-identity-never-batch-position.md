@@ -37,16 +37,16 @@ Retries re-deliver batches by design ([ADR 0013](0013-prefer-duplicates-over-dat
 
 We make idempotency a protocol property keyed on content-derived identity, per sink:
 
-- **SQL:** `insert` anti-joins from the stage ([ADR 0005](0005-stage-then-merge-is-the-single-sql-write-primitive.md)) on row identity, which is the contract primary key, or, for a keyless stream, a synthetic engine-managed `_record_hash` column (SHA-256 of the row as cast to the destination schema) declared as the table's primary key. `upsert` merges on `conflict_keys`.
+- **SQL:** `insert` anti-joins from the stage ([ADR 0005](0005-stage-then-merge-is-the-single-sql-write-primitive.md)) on row identity, which is the contract primary key, or, for a keyless stream, a synthetic engine-managed `_record_hash` column (SHA-256 of the row as cast to the destination schema) declared as the primary key when the engine creates the table. `upsert` merges on `conflict_keys`.
 - **API:** the engine owns the idempotency key value and sends one only when the write mode declares an `idempotency` block. Then `insert` sends the identity-derived `record_id` (first occurrence wins) and `upsert` sends `content_idempotency_key`, a full-content hash, so a changed row gets a new key and the update applies. Without the block no key is sent.
-- **File:** each batch file name carries its own hash, the first 16 hex characters of a SHA-256 of the serialized bytes (not `record_digest`); the file is written to a temp file and renamed into place. Time-partitioned paths resolve from the engine-stamped emit instant (`emitted_at_unix_ms`), stamped once per batch and resent unchanged on retry, never the sink's write-time clock.
+- **File:** each batch file name carries its own hash, the first 16 hex characters of a SHA-256 of the serialized bytes (not `record_digest`); `LocalFileStorage` writes it to a temp file and renames it into place. Time-partitioned paths resolve from the engine-stamped emit instant (`emitted_at_unix_ms`), stamped once per batch and resent unchanged on retry, never the sink's write-time clock.
 
 Every row-identity digest (the engine's `record_id`, the SQL `_record_hash`, the API `content_idempotency_key`) goes through one canonicalisation, `record_digest`; each caller keeps its own basis. `run_id`, `stream_id` and `batch_seq` are routing and ordering fields, never row-identity keys. The engine keeps no in-run pre-send skip of already-acked batches.
 
 ## Options considered
 
 ### Option A: Content-derived identity per sink (chosen)
-- Pro: correct under re-batching; no bookkeeping tables; dedup lives in the write itself and is identical on both SQL transports.
+- Pro: dedup survives re-batching wherever an identity is enforced (see Trade-offs); no bookkeeping tables; SQL dedup lives in the write itself and is identical on both transports.
 - Con: every sink needs an identity; keyless `insert` tables carry an extra column; byte-identical rows in them collapse to one.
 
 ### Option B: Positional commit ledger keyed on `(run_id, stream_id, batch_seq)`
@@ -63,12 +63,12 @@ Every row-identity digest (the engine's `record_id`, the SQL `_record_hash`, the
 
 ## Trade-offs
 
-Exactly-once holds only where an identity is enforced: a system that does not enforce primary keys reports at-least-once for `insert`; an API key dedups only inside the provider's replay window, and an API `insert` that declares no `idempotency` block sends no key and reports at-least-once; `truncate_insert`'s append phase and file sinks across a restart are at-least-once. Under keyed `insert`, a changed row whose key is already present is dropped like a re-read; under keyless `insert`, two genuinely identical rows become one and a changed row lands as a second row. A stream that updates changed rows in place must use `upsert`.
+Exactly-once holds only where an identity is enforced: a system that does not enforce primary keys reports at-least-once for `insert`; an API key dedups only inside the provider's replay window, and an API `insert` that declares no `idempotency` block sends no key and reports at-least-once; `truncate_insert`'s append phase, file sinks across a restart and stdout are at-least-once. Under keyed `insert`, a changed row whose key is already present is dropped like a re-read; under keyless `insert`, two genuinely identical rows become one and a changed row lands as a second row. A stream that updates changed rows in place must use `upsert`.
 
 ## Consequences
 
-- Easier: replays need no destination-side state; the retry verdict per write mode follows from the write itself.
-- Harder: the digest serialisation is a stability contract; changing it re-identifies every row. Keyless `insert` destination tables carry `_record_hash` as their primary key.
+- Easier: replays need no ledger; the retry verdict per write mode follows from the write itself.
+- Harder: the digest serialisation is a stability contract; changing it re-identifies every row. Keyless `insert` destination tables carry a `_record_hash` column.
 - **How we would know this was wrong:** duplicates or drops traced to a replay on a sink that reports exactly-once, or users needing to keep legitimate identical keyless rows.
 - Revisit if: a sink class appears with no content identity and no way to give it one.
 

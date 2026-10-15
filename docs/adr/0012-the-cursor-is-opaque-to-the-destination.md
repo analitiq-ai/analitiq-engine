@@ -43,13 +43,15 @@ format would touch every connector.
 We keep the cursor format engine-owned and opaque on the wire: `Cursor` is
 a single `bytes token` whose format the engine's cursor module owns
 (`encode_cursor`, `decode_cursor`, `compute_max_cursor`,
-`cursor_to_state_dict`). The destination receives the token with the batch
-and returns it unread as `committed_cursor` on a `SUCCESS` ack. The engine
+`cursor_to_state_dict`). The destination receives the token with the batch;
+the CDK's destination handlers return it unread as `committed_cursor` on a
+`SUCCESS` ack. The engine
 decodes the echoed token with `cursor_to_state_dict` and
-`StateManager.save_stream_checkpoint` persists the decoded primary
-watermark value to the stream's `CursorStore` file; the state log line
-carries the decoded cursor state, tie-breakers included, as hex-encoded
-JSON. Replay safety is keyed on row identity, not the cursor
+`StateManager.save_stream_checkpoint` writes the decoded primary
+watermark value to the stream's `CursorStore` file; at a log level of INFO
+or below, the state log line carries the decoded cursor state, tie-breakers
+included, as hex-encoded JSON. Where a sink dedups a replay, it does not
+use the cursor
 ([ADR 0014](0014-writes-are-idempotent-on-content-derived-identity-never-batch-position.md)).
 
 ## Options considered
@@ -67,8 +69,8 @@ JSON. Replay safety is keyed on row identity, not the cursor
 ## Trade-offs
 
 The destination can verify nothing about the cursor it echoes. The engine
-persists the watermark decoded from the echoed token only as
-[ADR 0013](0013-prefer-duplicates-over-data-loss.md) allows, and trusts the
+persists the watermark decoded from the echoed token only on a `SUCCESS`
+ack ([ADR 0013](0013-prefer-duplicates-over-data-loss.md)), and trusts the
 destination to echo the token it was sent. The token format and the
 per-batch maximum live in one engine module; the engine does not compare
 cursors across batches, so each committed watermark overwrites the last.
@@ -76,6 +78,8 @@ cursors across batches, so each committed watermark overwrites the last.
 Known exceptions in code:
 - Tie-breakers ride the token but not the checkpoint: `CursorStore` keeps
   the primary value alone, so a resumed read bounds on that value only.
+- A failed `CursorStore` write does not stop the load; the
+  file keeps what it held before until a later write succeeds.
 
 ## Consequences
 

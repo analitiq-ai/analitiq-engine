@@ -76,8 +76,8 @@ and [`destination-config.md`](destination-config.md#handler-registry).
   this rather than pulling in every format library transitively. No
   refusal renders the offending value in its message, since a param can
   carry a credential or continuation token.
-- Every pagination scheme runs on `cdk.api.PageLoop`, with one adapter per
-  scheme (see [ADR 0002](../adr/0002-one-stop-rule-for-every-paging-scheme.md)).
+- `GenericAPIConnector` runs every pagination scheme on `cdk.api.PageLoop`,
+  with one adapter per scheme (see [ADR 0002](../adr/0002-one-stop-rule-for-every-paging-scheme.md)).
 - The engine binds both the stored-cursor lower bound and (for a window
   form) the run's upper bound through `replication.cursor_mappings`,
   rendered in the mapping's declared format. An incremental stream whose

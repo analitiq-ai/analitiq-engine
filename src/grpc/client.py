@@ -284,9 +284,9 @@ class DestinationGRPCClient:
         Returns:
             True if connection successful and destination is healthy
         """
-        # No grpc.keepalive_* options: DestinationGRPCServer's ping limits answer
-        # a pinging client with GOAWAY ("too many pings"), tearing down the stream
-        # mid-batch.
+        # No grpc.keepalive_* options: DestinationGRPCServer's ping limits send
+        # GOAWAY ("too many pings") to a client that pings without data more
+        # often than they allow, tearing down the stream mid-batch.
         options = [
             ("grpc.max_send_message_length", self.max_message_size),
             ("grpc.max_receive_message_length", self.max_message_size),
@@ -1114,11 +1114,12 @@ def generate_record_id(
     renamed or dropped them, so the transformed row no longer carries them --
     the id falls back to the whole record. Without that fallback every row would
     hash the same all-missing-key value, so an API insert would send one
-    idempotency key for distinct rows and the provider would keep only the
-    first.
+    idempotency key for distinct rows and a provider deduplicating on it would
+    keep only the first.
 
     The full SHA-256 hex digest is returned (not truncated): as an idempotency
-    key, a truncated digest's collision would silently drop a distinct row.
+    key, a truncated digest's collision could make the provider drop a distinct
+    row.
 
     Only the basis is chosen here; the canonicalisation is
     :func:`~cdk.record_identity.record_digest`, shared with every other

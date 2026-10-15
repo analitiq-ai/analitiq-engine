@@ -1,8 +1,8 @@
 # Connector Conformance Kit
 
 The CDK ships an acceptance suite for connector packages
-(`cdk.conformance`, installed with the `conformance` extra), run in each
-connector repo's CI (see
+(`cdk.conformance`, installed with the `conformance` extra), run in a
+connector repo's own CI (see
 [ADR 0021](../adr/0021-connectors-are-certified-by-the-cdk-conformance-kit-in-their-own-ci.md)).
 What it asserts about the SQL write primitive is in
 [sql-write-path](../data-path/sql-write-path.md) §10.
@@ -137,9 +137,8 @@ live-tier only.
 Which systems run tier 1 only, and why `kind: api` has no live tier, is
 recorded in
 [ADR 0021](../adr/0021-connectors-are-certified-by-the-cdk-conformance-kit-in-their-own-ci.md).
-An api connector's tier-2 run skips, naming that reason, and the
-applicability gate below does not fire. Kind `api` is assessed in full at
-tier 1, where the read path is executed.
+Kind `api` is
+assessed at tier 1, where the read path is executed.
 
 ## What it cannot assess, it does not pass
 
@@ -269,8 +268,7 @@ Systems without a service container drop the tier-2 step (see
 A job that *does* provision a container should also set
 `ANALITIQ_CONFORMANCE_REQUIRE_LIVE=1` (as the snippet's engine-side
 counterpart does): with it, a missing live connection fails the job
-instead of skipping, so a typo'd variable can never silently retire the
-live tier while CI stays green.
+instead of skipping.
 
 The checks are also plain importable functions
 (`cdk.conformance.check_override_surface`,

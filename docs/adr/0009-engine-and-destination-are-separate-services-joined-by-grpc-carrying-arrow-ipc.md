@@ -39,12 +39,12 @@ Both services load the same pipeline through `PipelineConfigPrep` from the same 
 
 The data travels only as Arrow IPC: one `pa.RecordBatch` per `RecordBatch` message, schema in the same buffer. The destination refuses any other `PayloadFormat`, and the source worker's `ReadResponse` uses the same encoding.
 
-Inside the destination service, a `WorkerProxyHandler` forwards to a connector worker over a Unix socket using the same `DestinationService` contract (see [ADR 0008](0008-connector-code-runs-only-in-an-isolated-worker.md)), so the cross-container TCP channel stays credential-free.
+Inside the destination service, a `WorkerProxyHandler` forwards to a connector worker over a Unix socket using the same `DestinationService` contract (see [ADR 0008](0008-connector-code-runs-only-in-an-isolated-worker.md)), so the engine sends no connection credentials over the cross-container TCP channel.
 
 ## Options considered
 
 ### Option A: Separate services, one image, slim handshake (chosen)
-Pro: independent failure and scaling, language-neutral destinations, one artifact, and a data plane with no secrets. Con: a wire protocol, a handshake and ack machinery to maintain.
+Pro: independent failure and scaling, language-neutral destinations, one artifact, and a data plane the engine puts no connection credentials on. Con: a wire protocol, a handshake and ack machinery to maintain.
 
 ### Option B: Load in-process inside the engine
 Pro: no protocol, no second container. Con: source and destination share failure and scaling, and destinations must be Python.
@@ -63,11 +63,11 @@ Pro: buffering and replay. Con: a new piece of infrastructure, and ack-per-batch
 
 ## Trade-offs
 
-Both containers must mount the same config and resolve the same `PIPELINE_ID`, and the destination repeats config loading and validation. A mismatch between the two config copies is not detected by the handshake. Every destination language needs an Arrow IPC implementation and its own loader for the pipeline config, which exists only as the Python `PipelineConfigPrep`, and a batch is bounded by the single gRPC message cap (`GRPC_MAX_MESSAGE_SIZE`). `write_mode` reaches the destination twice: on the handshake, and from its own config, where it scopes which transports the worker receives.
+Both containers must mount the same config and resolve the same `PIPELINE_ID`, and the destination repeats config loading and validation. Nothing on the handshake compares the two config copies. Failure text on the acks (`failure_summary`, the `SchemaAck` message) is sent back unredacted and can carry exception text from the connector or its driver. Every destination language needs an Arrow IPC implementation and its own loader for the pipeline config. `write_mode` reaches the destination twice: on the handshake, and from its own config, where it scopes which transports the worker receives.
 
 ## Consequences
 
-- Easier: restarting or scaling a destination without touching extraction; a captured gRPC stream holds no secrets.
+- Easier: restarting or scaling a destination without touching extraction; a captured gRPC stream holds no connection credentials sent by the engine.
 - Harder: every engine-destination interaction is a protocol change with regenerated bindings; deployment must deliver identical config to two containers.
 - **How we would know this was wrong:** incidents traced to the two services loading different config, or the handshake repeatedly growing fields the destination could have read from config, or destinations blocked on a language with no Arrow IPC reader.
 - Revisit if: destinations are expected to run without access to the pipeline config, which would force config onto the wire.

@@ -99,7 +99,7 @@ An API read's declared `response.metadata` (a provider-reported total, a rate-li
 message Cursor { bytes token = 1; }
 ```
 
-The destination returns the token unread in the ACK (see [ADR 0012](../adr/0012-the-cursor-is-opaque-to-the-destination.md)). The token is JSON for debuggability (`src/grpc/cursor.py`):
+The CDK's handlers return the token unread in the ACK (see [ADR 0012](../adr/0012-the-cursor-is-opaque-to-the-destination.md)). The token is JSON for debuggability (`src/grpc/cursor.py`):
 
 ```json
 {"field": "created_at", "value": "2025-01-08T10:00:00Z",
@@ -144,7 +144,7 @@ There is no partial status (see [ADR 0011](../adr/0011-a-batch-is-accepted-or-re
 
 Any sender may declare a category — the config-defect and write-failure excepts in `cdk/cdk/sql/generic.py`, every pre-flight guard via `reject_batch`, the destination servicer's own batch-before-schema rejection, and a thick connector that overrides `write_batch`.
 
-`SchemaAck` carries the same field: a destination shell that could not reach its connector worker declares `NOT_READY`, which is the only way the engine can tell that refusal apart from one the customer's configuration caused.
+`SchemaAck` carries the same field: a destination shell that could not reach its connector worker declares `NOT_READY`, so the engine can tell that refusal apart from one the customer's configuration caused without reading the message text.
 
 ## Key Design Decisions
 
@@ -160,7 +160,7 @@ The cursor is opaque to the destination ([ADR 0012](../adr/0012-the-cursor-is-op
 
 Write idempotency is decided in [ADR 0014](../adr/0014-writes-are-idempotent-on-content-derived-identity-never-batch-position.md). Per-handler mechanics, including which write modes report at-least-once, are in [destination-config.md](../config/destination-config.md#idempotency).
 
-Every handler reports its retry-safety verdict per stream in the `SchemaAck` (`retry_semantics` + `retry_semantics_reason`, forwarded verbatim across the worker-proxy hop), and the engine logs it at stream start; it never gates a retry (see [ADR 0013](../adr/0013-prefer-duplicates-over-data-loss.md)).
+Each handler reports a retry-safety verdict per stream in an accepted `SchemaAck` (`retry_semantics` + `retry_semantics_reason`). The worker proxy re-reports the worker's verdict, or the at-least-once default when the worker sent none. The engine reads it only to log it at INFO at stream start, not to gate a retry (see [ADR 0013](../adr/0013-prefer-duplicates-over-data-loss.md)).
 
 ### All-or-nothing batches
 

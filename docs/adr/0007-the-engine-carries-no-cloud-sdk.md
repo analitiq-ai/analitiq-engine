@@ -35,14 +35,17 @@ We keep cloud SDKs out of the engine's core dependencies. State, logs, DLQ and m
 
 - When a destination ACK reports that this run committed a batch, `StateManager.save_stream_checkpoint` writes an incremental stream's cursor to its own file, `state/{pipeline_id}/{stream_id}.json` (`CursorStore`), and emits an `ANALITIQ_STATE::` stdout line for the deployment to harvest.
 - Metrics leave as `ANALITIQ_METRICS::` lines (`save_pipeline_metrics`); DLQ payloads go to local JSONL (`LocalDLQStorage`) with only an `ANALITIQ_DLQ::` count summary on stdout.
-- The next run gets its cursors back as the same per-stream files inside its config bundle. `hydrate_archive` fetches a bundle from a local path or a plain `http(s)` URL (a presigned object-store URL is opaque HTTPS), so no env var and no engine-side cloud read is involved.
+- The next run gets its cursors back as the same per-stream files inside its config bundle. `hydrate_archive` fetches a bundle from a local path or a plain `http(s)` URL (a presigned object-store URL is opaque HTTPS) with the standard library, so the cursors travel in no env var and the fetch needs no cloud SDK.
 
-Known exception: `boto3` is an optional `s3` extra of both the engine and the CDK, imported lazily by `SchemeSecretsResolver` only when a connection uses an `s3://` secret ref. It is not a core dependency and the Docker image's requirements do not install it.
+Known exceptions:
+
+- `emit_log` writes the state, metrics and DLQ markers at INFO through the root logger, so a log level above INFO (`LOG_LEVEL`, or the pipeline's `runtime.logging.log_level`) suppresses all three.
+- `boto3` is an optional `s3` extra of both the engine and the CDK, imported lazily by `SchemeSecretsResolver` only when a connection uses an `s3://` secret ref. It is not a core dependency and the Docker image's requirements do not install it.
 
 ## Options considered
 
 ### Option A: Local files and stdout, harvested by the deployment (chosen)
-Pro: one code path for local and cloud runs, a lean image, a public repo with no cloud code. Con: correctness of resume depends on a deployment pipeline outside this repo.
+Pro: one code path for local and cloud runs, a lean image, a public repo with no cloud SDK in its core dependencies. Con: correctness of resume depends on a deployment pipeline outside this repo.
 
 ### Option B: Write state, DLQ and metrics directly to cloud stores through an SDK
 Pro: durable with no external shipper. Con: ties the engine to one provider and its credentials model, and makes local runs a second code path.
@@ -55,11 +58,11 @@ Pro: no bundle change. Con: one variable for all streams grows with the stream c
 
 ## Trade-offs
 
-The engine cannot verify that its state was harvested; a deployment that drops the `ANALITIQ_STATE` lines or forgets to repackage the files makes the next run do a full re-scan, which costs time but not data. A checkpoint file that cannot be written is logged as a warning and does not fail the load; its `ANALITIQ_STATE` line has already been emitted. Observability depends on an external log shipper parsing stdout markers, so those marker formats are a contract with the deployment. The `s3` extra is a bounded leak of cloud code into the public repo, accepted to support one secret scheme.
+The engine cannot verify that its state was harvested; a deployment that drops the `ANALITIQ_STATE` lines or forgets to repackage the files makes the next run do a full re-scan, which reads rows again rather than losing them; a sink that does not dedup on content-derived identity writes them again. A failed checkpoint write does not fail the load; its `ANALITIQ_STATE` line was logged before the write, and reaches stdout when the log level is INFO or lower. Observability depends on an external log shipper parsing stdout markers, so those marker formats are a contract with the deployment. The `s3` extra is a bounded leak of cloud code into the public repo, accepted to support one secret scheme.
 
 ## Consequences
 
-- Easier: running the engine anywhere with a filesystem; local runs and cloud runs read the same files; concurrent streams never contend on a shared state file.
+- Easier: running the engine anywhere with a filesystem; local runs and cloud runs read the same files.
 - Harder: every new kind of durable output needs a stdout marker or a bundle directory plus a matching change in the deployment's harvester.
 - **How we would know this was wrong:** resume or metrics loss traced to the harvest step recurs, or deployments routinely build their own engine fork to write state directly.
 - Revisit if: a second cloud scheme is requested for secrets or bundles, which would turn the lazy `s3` exception into a pattern.

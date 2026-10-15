@@ -60,12 +60,12 @@ We let a connector declare its driver's failures as data in its `error_map`: whi
 A connector that wants precise customer codes must declare its failures ([ADR 0001](0001-two-failure-vocabularies.md)). Matching one hop deep means a driver that wraps deeper must use `classify_error`.
 
 Known exceptions in code:
-- A connector class that overrides `write_batch` builds its own `BatchWriteResult`, status and failure category included, so it self-declares a write verdict. The conformance override-surface check refuses such an override for `kind: database` only; for other kinds the engine range-checks the category but uses an in-range value as sent.
+- A connector class that overrides `write_batch` builds its own `BatchWriteResult`, status and failure category included, so it self-declares a write verdict. The kit's override-surface check flags such an override in the connector's CI, for `kind: database` only.
 - For an HTTP response, an API dialect's `classify` hook is consulted before the declared `http` map: code before data, the reverse of the exception path.
 - On read paths, a typed error raised with its own `declared_category` outranks the map; it is still a category, validated against the vocabulary, not a verdict.
 - On read paths, a failure nothing claims falls to a type ladder, so a connector that raises `ReadError` or `TransientReadError` without a category chooses the fatal or retryable verdict itself.
-- The CDK's SQL read wraps a source connect failure in `ReadError`, so the worker matches the map one hop above the driver error: a native code SQLAlchemy keeps on `orig` is two hops away, and unless `classify_error` claims the failure it reads as deterministic.
-- The map is consulted only for read and batch-write failures. A destination's connect and schema-handshake failures, DDL included, take the engine's own classification whatever the map declares.
+- The CDK's SQL read wraps a source connect failure that is not already a deterministic connect error in `ReadError`, so the worker matches the map one hop above the driver error: a native code SQLAlchemy keeps on `orig` is two hops away, and unless the map matches the `ReadError` or its direct cause, or `classify_error` claims the failure, it reads as deterministic.
+- The map is consulted only for read and batch-write failures. A destination's connect and schema-handshake failures, DDL included, are classified without it.
 
 ## Consequences
 

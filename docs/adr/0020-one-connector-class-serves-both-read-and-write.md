@@ -38,7 +38,7 @@ We give each connector family one CDK class that serves both roles: `GenericSQLC
 ## Options considered
 
 ### Option A: one class per family, both roles (chosen)
-- Pro: auth and request binding are written once, so read and write cannot disagree on them.
+- Pro: auth and query/header binding are written once and shared by read and write.
 - Con: one larger class that must satisfy both Protocols.
 
 ### Option B: separate source and destination classes per family (Airbyte/Singer style)
@@ -51,13 +51,12 @@ A change to a shared mechanism reaches both directions at once, for good or ill.
 
 Known exceptions in code:
 - The engine registry does not refuse a split: `build_registries` fills two registries from two groups and would resolve different classes per role. Only the conformance kit's target loading checks the rule, and only when both groups name a class.
-- A package that registers its class in one group only passes the kit, which audits that class; production resolves the `KIND_DEFAULTS` generic class for the other role. A run given `--connector-class` reads no entry points at all.
-- `GenericSQLConnector` opens its connection on two paths, `connect` for writes and inline in `read_batches` for reads, so the same connect failure surfaces as `ConnectionError` on one and `ReadError` on the other.
+- A package that registers its class in one group only passes this check, and the kit audits that class; production resolves the other role through `KIND_DEFAULTS`. A run given `--connector-class` reads no entry points at all.
 - Kinds whose generic class serves one role (`file`, `s3`, `stdout` are destination-only) have one class for that role; the rule binds families that serve both.
 
 ## Consequences
 
-- Easier: a fix to auth or request binding lands in both directions in one change.
+- Easier: a fix to auth or query/header binding lands in both directions in one change.
 - Harder: a system whose read and write genuinely need different code must hold both in one class and one dialect.
 - **How we would know this was wrong:** role branches accumulating inside the generic classes for behaviour the endpoint document cannot express.
 - Revisit if: a family appears whose read and write share no transport or classification logic.
